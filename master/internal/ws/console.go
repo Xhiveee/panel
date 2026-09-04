@@ -66,10 +66,14 @@ func (h *Handler) ConsoleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{OriginPatterns: []string{"*"}})
+	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+		// No OriginPatterns: enforce same-origin. Cross-site pages cannot
+		// hijack the console via the victim's cookies (CSWH).
+	})
 	if err != nil {
 		return
 	}
+	conn.SetReadLimit(64 * 1024) // bound a single browser frame
 	defer conn.Close(websocket.StatusInternalError, "")
 
 	ctx, cancel := context.WithCancel(r.Context())
@@ -107,6 +111,9 @@ func (h *Handler) ConsoleWS(w http.ResponseWriter, r *http.Request) {
 			var f browserFrame
 			if err := json.Unmarshal(data, &f); err != nil || f.Type != "input" || f.Data == "" {
 				continue
+			}
+			if len(f.Data) > 8192 {
+				continue // flood guard: drop oversized stdin chunks
 			}
 			ictx, icancel := context.WithTimeout(ctx, protocol.RequestTimeout)
 			rerr = h.Hub.RequestDecode(ictx, inst.NodeID, protocol.OpConsoleInput,

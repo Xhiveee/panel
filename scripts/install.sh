@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_URL="${PANEL_REPO_URL:-https://github.com/Xhiveee/panel}"
-BRANCH="${PANEL_BRANCH:-main}"
-GO_VERSION="${PANEL_GO_VERSION:-1.23.12}"
+REPO_URL="https://github.com/Xhiveee/panel"
+BRANCH="main"
+GO_VERSION="1.23.12"
+# Custom sources only on explicit opt-in: env-driven URLs are a supply-chain
+# RCE vector when the installer runs as root.
+if [[ "${PANEL_ALLOW_CUSTOM_REPO:-0}" == "1" ]]; then
+  REPO_URL="${PANEL_REPO_URL:-$REPO_URL}"
+  BRANCH="${PANEL_BRANCH:-$BRANCH}"
+  GO_VERSION="${PANEL_GO_VERSION:-$GO_VERSION}"
+fi
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
@@ -14,11 +21,24 @@ ask() {
   read -r -p "$prompt" value </dev/tty || die "не удалось прочитать ввод"
   printf '%s' "${value:-$default}"
 }
+# ask_secret reads without echo (passwords/tokens must not be shoulder-surfed
+# or stored in shell history).
+ask_secret() {
+  local prompt="$1" value
+  read -r -s -p "$prompt" value </dev/tty || die "не удалось прочитать ввод"
+  printf '\n' >&2
+  printf '%s' "$value"
+}
 run_as_panel() {
   if command -v runuser >/dev/null 2>&1; then
     runuser -u panel -- "$@"
+  elif command -v setpriv >/dev/null 2>&1; then
+    setpriv --reuid panel --regid panel --clear-groups -- "$@"
+  elif command -v /bin/bash >/dev/null 2>&1 && [[ -n "${BASH_VERSION:-}" ]]; then
+    # %q is bash syntax: only use it with bash, never with /bin/sh (dash).
+    su -s /bin/bash panel -c "$(printf '%q ' "$@")"
   else
-    su -s /bin/sh panel -c "$(printf '%q ' "$@")"
+    die "нужен runuser или setpriv для безопасного запуска от panel"
   fi
 }
 valid_value() {
@@ -68,7 +88,9 @@ install_go() {
   esac
   archive="go${GO_VERSION}.linux-${arch}.tar.gz"
   log "Скачиваю Go $GO_VERSION в локальный каталог"
-  curl -fsSL "https://go.dev/dl/$archive" -o "$WORK_DIR/$archive"
+  curl -fsSL --proto '=https' --tlsv1.2 "https://go.dev/dl/$archive" -o "$WORK_DIR/$archive"
+  curl -fsSL --proto '=https' --tlsv1.2 "https://go.dev/dl/$archive.sha256" -o "$WORK_DIR/$archive.sha256"
+  (cd "$WORK_DIR" && sha256sum -c "$archive.sha256") || die "SHA256 Go не сошёлся, прерываю установку"
   mkdir -p "$WORK_DIR/go"
   tar -C "$WORK_DIR/go" --strip-components=1 -xzf "$WORK_DIR/$archive"
   export GOROOT="$WORK_DIR/go"
@@ -79,7 +101,7 @@ install_go() {
 
 download_source() {
   log "Скачиваю Panel"
-  curl -fsSL "$REPO_URL/archive/refs/heads/$BRANCH.tar.gz" -o "$WORK_DIR/panel.tar.gz"
+  curl -fsSL --proto '=https' --tlsv1.2 "$REPO_URL/archive/refs/heads/$BRANCH.tar.gz" -o "$WORK_DIR/panel.tar.gz"
   tar -xzf "$WORK_DIR/panel.tar.gz" -C "$WORK_DIR"
   SOURCE_DIR="$(find "$WORK_DIR" -mindepth 1 -maxdepth 1 -type d -name 'panel-*' | head -n 1)"
   [[ -n "${SOURCE_DIR:-}" ]] || die "не удалось распаковать исходники"
@@ -105,19 +127,21 @@ remove_master() {
   systemctl disable --now panel-master 2>/dev/null || true
   rm -f /etc/systemd/system/panel-master.service /usr/local/bin/panel-master
   systemctl daemon-reload
-  delete_data="$(ask 'Удалить данные Master (/var/lib/panel)? [y/N]: ' n)"
+  delete_data="$(ask 'Удалить данные Master (/var/lib/panel, включая базу пользователей)? [y/N]: ' n)"
   if [[ "$delete_data" =~ ^[YyДд]$ ]]; then
     rm -rf /var/lib/panel
     log "Master и его данные удалены"
   else
-    log "Master удалён, данные сохранены в /var/lib/panel"
+    log "Master удалён, данные сохранены в /var/lib/panel (при переустановке будет использован прежний пароль, если не задать новый)"
   fi
+  log "Системный пользователь panel оставлен (переиспользуется при переустановке)"
 }
 
 remove_agent() {
   local delete_data
   systemctl disable --now panel-agent 2>/dev/null || true
   rm -f /etc/systemd/system/panel-agent.service /usr/local/bin/panel-agent /etc/panel/agent.json
+  rmdir /etc/panel 2>/dev/null || true
   systemctl daemon-reload
   delete_data="$(ask 'Удалить данные Agent (/var/lib/panel-agent)? [y/N]: ' n)"
   if [[ "$delete_data" =~ ^[YyДд]$ ]]; then
@@ -126,10 +150,11 @@ remove_agent() {
   else
     log "Agent удалён, данные сохранены в /var/lib/panel-agent"
   fi
+  log "Системный пользователь panel оставлен (переиспользуется при переустановке)"
 }
 
 show_master_info() {
-  local username="$1" existing="$2" ip
+  local username="$1" ip
   ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
   [[ -n "$ip" ]] || ip="<IP_СЕРВЕРА>"
   printf '\n'
@@ -137,11 +162,7 @@ show_master_info() {
   printf 'Откройте панель: http://%s:8080\n' "$ip"
   printf 'Локальный адрес:  http://127.0.0.1:8080\n'
   printf 'Логин:            %s\n' "$username"
-  if [[ "$existing" -eq 1 ]]; then
-    printf 'Пароль:            используется прежний пароль существующего пользователя\n'
-  else
-    printf 'Пароль:            тот, который вы ввели выше\n'
-  fi
+  printf 'Пароль:           тот, который вы ввели выше\n'
   printf '\n'
   printf 'Данные Master:     /var/lib/panel\n'
   printf 'Статус:            systemctl status panel-master --no-pager\n'
@@ -165,10 +186,10 @@ show_agent_info() {
 }
 
 install_master() {
-  local username admin_pass pid i log_file ready existing
+  local username admin_pass pid i log_file ready cred_file
   username="$(ask 'Логин администратора [admin]: ' admin)"
-  admin_pass="$(ask 'Пароль администратора (минимум 6 символов): ')"
-  [[ ${#admin_pass} -ge 6 ]] || die "пароль должен содержать минимум 6 символов"
+  admin_pass="$(ask_secret 'Пароль администратора (минимум 8 символов): ')"
+  [[ ${#admin_pass} -ge 8 ]] || die "пароль должен содержать минимум 8 символов"
   valid_value "$username" || die "логин содержит недопустимые символы"
   valid_value "$admin_pass" || die "пароль содержит недопустимые символы"
 
@@ -181,59 +202,75 @@ install_master() {
   systemctl stop panel-master 2>/dev/null || true
   log "Создаю администратора"
   log_file="$WORK_DIR/bootstrap.log"
+  # Credentials via a 0600 file: never pass the password in argv (ps/journal).
+  cred_file="$WORK_DIR/admin.cred"
+  printf '%s:%s' "$username" "$admin_pass" >"$cred_file"
+  chmod 600 "$cred_file"
+  admin_pass=""
   run_as_panel /usr/local/bin/panel-master -data /var/lib/panel \
-    -create-admin "$username:$admin_pass" >"$log_file" 2>&1 &
+    -create-admin-file "$cred_file" >"$log_file" 2>&1 &
   pid=$!
   ready=0
-  existing=0
   for ((i=0; i<30; i++)); do
     if grep -q "master listening" "$log_file" 2>/dev/null; then
       ready=1
       break
     fi
     if ! kill -0 "$pid" 2>/dev/null; then
-      if wait "$pid"; then
-        :
-      elif grep -q "UNIQUE constraint failed: users.username" "$log_file" 2>/dev/null; then
-        existing=1
-        break
-      else
-        cat "$log_file" >&2
-        die "не удалось создать администратора"
-      fi
+      # Bootstrap exited before listening: show the real error.
+      wait "$pid" 2>/dev/null || true
+      cat "$log_file" >&2
+      die "не удалось создать администратора (см. лог выше)"
     fi
     sleep 1
   done
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
-  cat "$log_file"
-  if [[ "$existing" -eq 1 ]]; then
-    log "Пользователь уже существует, сохраняю текущую учётную запись"
-  elif [[ "$ready" -ne 1 ]]; then
+  rm -f "$cred_file"
+  if [[ "$ready" -ne 1 ]]; then
+    cat "$log_file" >&2
     die "Master не запустился за отведённое время"
   fi
 
   systemctl daemon-reload
   systemctl enable --now panel-master
-  show_master_info "$username" "$existing"
+  show_master_info "$username"
 }
 
 install_agent() {
-  local master_url token data_dir name
-  master_url="$(ask 'URL WebSocket master [ws://MASTER_IP:8080/api/agent/ws]: ')"
-  token="$(ask 'Токен ноды из панели: ')"
+  local master_url token data_dir name canon
+  master_url="$(ask 'URL WebSocket master [wss://MASTER:8080/api/agent/ws]: ')"
+  token="$(ask_secret 'Токен ноды из панели: ')"
+  printf '\n' >&2
   data_dir="$(ask 'Каталог данных [/var/lib/panel-agent]: ' /var/lib/panel-agent)"
   name="$(ask 'Имя ноды [node-1]: ' node-1)"
   [[ -n "$master_url" && -n "$token" && -n "$data_dir" && -n "$name" ]] || die "все значения обязательны"
-  valid_value "$master_url" && valid_value "$token" && valid_value "$data_dir" && valid_value "$name" ||
+  valid_value "$master_url" && valid_value "$data_dir" && valid_value "$name" ||
     die "значения содержат недопустимые символы"
+  [[ "$master_url" == ws://* || "$master_url" == wss://* ]] || die "master URL должен начинаться с ws:// или wss:// (для продакшна — wss://)"
+  [[ "$master_url" == wss://* ]] || log "Внимание: ws:// без TLS — токен и консоль видны в сети, используйте wss://"
 
   install -m 0755 "$BINARY" /usr/local/bin/panel-agent
   id panel >/dev/null 2>&1 || useradd --system --home /var/lib/panel-agent --shell /usr/sbin/nologin panel
-  mkdir -p /etc/panel "$data_dir"
-  chown -R panel:panel "$data_dir"
-  printf '{\n  "masterUrl": "%s",\n  "token": "%s",\n  "dataDir": "%s",\n  "name": "%s"\n}\n' \
-    "$master_url" "$token" "$data_dir" "$name" > /etc/panel/agent.json
+  # Canonicalize and confine: never chown -R an arbitrary path as root.
+  canon="$(realpath -m "$data_dir")"
+  [[ "$canon" == /var/lib/panel-agent || "$canon" == /var/lib/panel-agent/* ]] ||
+    die "каталог данных должен быть внутри /var/lib/panel-agent"
+  mkdir -p /etc/panel "$canon"
+  chown -R panel:panel "$canon"
+  # JSON without printf-injection: escape via python3 (preferred) or jq.
+  if command -v python3 >/dev/null 2>&1; then
+    MASTER_URL="$master_url" TOKEN="$token" DATA_DIR="$canon" NAME="$name" python3 -c \
+      'import json,os; json.dump({"masterUrl":os.environ["MASTER_URL"],"token":os.environ["TOKEN"],"dataDir":os.environ["DATA_DIR"],"name":os.environ["NAME"]}, open("/etc/panel/agent.json","w"), indent=2)' \
+      || die "не удалось записать agent.json"
+  elif command -v jq >/dev/null 2>&1; then
+    jq -n --arg m "$master_url" --arg t "$token" --arg d "$canon" --arg n "$name" \
+      '{masterUrl:$m,token:$t,dataDir:$d,name:$n}' > /etc/panel/agent.json \
+      || die "не удалось записать agent.json"
+  else
+    die "нужен python3 или jq для безопасной записи agent.json"
+  fi
+  token=""; master_url=""
   chown panel:panel /etc/panel/agent.json
   chmod 600 /etc/panel/agent.json
   install -m 0644 "$SOURCE_DIR/deploy/systemd/panel-agent.service" /etc/systemd/system/panel-agent.service

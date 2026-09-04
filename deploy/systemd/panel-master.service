@@ -1,4 +1,4 @@
--- Panel master systemd unit (production Linux deploy).
+# Panel master systemd unit (production Linux deploy).
 [Unit]
 Description=Panel master
 After=network-online.target

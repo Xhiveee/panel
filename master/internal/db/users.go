@@ -72,14 +72,23 @@ func (d *DB) Users() ([]*User, error) {
 
 // SetPassword updates a user's password hash.
 func (d *DB) SetPassword(userID int64, hash string) error {
-	_, err := d.sql.Exec(`UPDATE users SET password_hash = ? WHERE id = ?`, hash, userID)
-	return err
+	res, err := d.sql.Exec(`UPDATE users SET password_hash = ? WHERE id = ?`, hash, userID)
+	if err != nil {
+		return err
+	}
+	return requireAffected(res)
 }
 
-// SetRole updates a user's role.
+// SetRole updates a user's role (allow-list enforced as defense-in-depth).
 func (d *DB) SetRole(userID int64, role string) error {
-	_, err := d.sql.Exec(`UPDATE users SET role = ? WHERE id = ?`, role, userID)
-	return err
+	if role != "admin" && role != "user" {
+		return errors.New("invalid role")
+	}
+	res, err := d.sql.Exec(`UPDATE users SET role = ? WHERE id = ?`, role, userID)
+	if err != nil {
+		return err
+	}
+	return requireAffected(res)
 }
 
 // DeleteUser removes a user.

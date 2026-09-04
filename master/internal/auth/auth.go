@@ -48,8 +48,8 @@ func FromContext(ctx context.Context) *User {
 
 // HashPassword hashes a password with bcrypt.
 func HashPassword(password string) (string, error) {
-	if len(password) < 6 {
-		return "", errors.New("password must be at least 6 characters")
+	if len(password) < 8 {
+		return "", errors.New("password must be at least 8 characters")
 	}
 	b, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	return string(b), err
@@ -97,8 +97,19 @@ func ParseToken(secret, token string) (*User, error) {
 	if !ok || !t.Valid {
 		return nil, errors.New("invalid token")
 	}
+	if c.Issuer != "panel-master" {
+		return nil, errors.New("invalid token issuer")
+	}
+	if c.Subject == "" {
+		return nil, errors.New("invalid token subject")
+	}
+	if c.Role != RoleAdmin && c.Role != RoleUser {
+		return nil, errors.New("invalid token role")
+	}
 	var id int64
-	_, _ = fmt.Sscanf(c.Subject, "%d", &id)
+	if _, err := fmt.Sscanf(c.Subject, "%d", &id); err != nil || id <= 0 {
+		return nil, errors.New("invalid token subject")
+	}
 	return &User{ID: id, Username: c.Username, Role: c.Role}, nil
 }
 

@@ -108,20 +108,26 @@ func (s *Server) Routes(consoleWS http.Handler) http.Handler {
 }
 
 // HandleAgentEvent processes asynchronous events coming from agents.
+// InstanceID ownership is verified: a node can only emit events for its own
+// instances, so a compromised agent cannot poison foreign state.
 func (s *Server) HandleAgentEvent(nodeID int64, msg protocol.Message) {
 	switch msg.Event {
 	case protocol.EventConsole:
 		var ev protocol.ConsoleEvent
 		if json.Unmarshal(msg.Data, &ev) == nil && ev.Data != "" {
-			s.Consoles.Broadcast(ev.InstanceID, ev.Data)
+			if s.ownsInstance(nodeID, ev.InstanceID) {
+				s.Consoles.Broadcast(ev.InstanceID, ev.Data)
+			}
 		}
 
 	case protocol.EventInstanceStatus:
 		var ev protocol.StatusEvent
 		if json.Unmarshal(msg.Data, &ev) == nil {
-			s.mu.Lock()
-			s.statuses[ev.InstanceID] = ev
-			s.mu.Unlock()
+			if s.ownsInstance(nodeID, ev.InstanceID) {
+				s.mu.Lock()
+				s.statuses[ev.InstanceID] = ev
+				s.mu.Unlock()
+			}
 		}
 
 	case protocol.EventNodeMetrics:
@@ -130,12 +136,23 @@ func (s *Server) HandleAgentEvent(nodeID int64, msg protocol.Message) {
 			now := time.Now()
 			s.Store.PushNode(nodeID, ev.CPU, float64(ev.MemUsed), now)
 			for _, im := range ev.Instances {
-				s.Store.PushInstance(im.InstanceID, im.CPU, float64(im.RSS), now)
+				if s.ownsInstance(nodeID, im.InstanceID) {
+					s.Store.PushInstance(im.InstanceID, im.CPU, float64(im.RSS), now)
+				}
 			}
 			s.Store.SetNodeSummary(nodeID, ev.MemTotal, ev.MemUsed, ev.CPU, ev.Uptime)
 			s.touchNode(nodeID)
 		}
 	}
+}
+
+// ownsInstance reports whether instanceID belongs to nodeID.
+func (s *Server) ownsInstance(nodeID, instanceID int64) bool {
+	inst, err := s.DB.GetInstance(instanceID)
+	if err != nil {
+		return false
+	}
+	return inst.NodeID == nodeID
 }
 
 // touchNode persists node liveness at most once per 15s per node.
@@ -295,6 +312,12 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 func readJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 	dec := json.NewDecoder(r.Body)
 	if err := dec.Decode(v); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON body")
+		return false
+	}
+	// Reject trailing garbage after the first JSON value.
+	var extra any
+	if err := dec.Decode(&extra); err == nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return false
 	}

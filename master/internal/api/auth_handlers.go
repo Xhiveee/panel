@@ -9,13 +9,15 @@ import (
 	"panel/master/internal/db"
 )
 
-func (s *Server) setSessionCookie(w http.ResponseWriter, token string, maxAge int) {
+func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, token string, maxAge int) {
+	secure := r != nil && r.TLS != nil
 	http.SetCookie(w, &http.Cookie{
 		Name:     auth.CookieName,
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
+		Secure:   secure,
+		SameSite: http.SameSiteStrictMode,
 		MaxAge:   maxAge,
 	})
 }
@@ -41,7 +43,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	s.setSessionCookie(w, token, int(s.TokenTTL/time.Second))
+	s.setSessionCookie(w, r, token, int(s.TokenTTL/time.Second))
 	s.DB.AddAudit(u.Username, "auth.login", "", "")
 	writeJSON(w, http.StatusOK, map[string]any{"token": token, "user": u})
 }
@@ -65,6 +67,6 @@ func (s *Server) loginUser(username, password string) (*db.User, error) {
 
 // logout clears the session cookie.
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
-	s.setSessionCookie(w, "", -1)
+	s.setSessionCookie(w, r, "", -1)
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }

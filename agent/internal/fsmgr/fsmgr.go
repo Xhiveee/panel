@@ -34,6 +34,10 @@ func New(root string) (*Mgr, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Resolve root symlinks once so containment checks compare real paths.
+	if real, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = real
+	}
 	return &Mgr{Root: abs}, nil
 }
 
@@ -52,31 +56,47 @@ func NewRegistry() *Registry {
 
 // Bind records the root dir for an instance (called on start/create).
 func (re *Registry) Bind(instanceID int64, root string) {
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return
+	}
 	re.mu.Lock()
 	defer re.mu.Unlock()
-	re.roots[instanceID] = root
+	re.roots[instanceID] = abs
 	delete(re.mgr, instanceID) // re-create with the (possibly changed) root
 }
 
-// For returns the manager for an instance, creating it from the bound root.
+// For returns the manager for an instance. A non-empty root must match the
+// bound root: network-supplied Dir values are never trusted to move the root
+// (first-request-wins escape fixed).
 func (re *Registry) For(instanceID int64, root string) (*Mgr, error) {
 	re.mu.Lock()
 	defer re.mu.Unlock()
-	if root == "" {
-		root = re.roots[instanceID]
+	bound := re.roots[instanceID]
+	if root != "" {
+		abs, err := filepath.Abs(root)
+		if err != nil {
+			return nil, errors.New("invalid root")
+		}
+		if bound != "" && abs != bound {
+			return nil, errors.New("root mismatch for instance")
+		}
+		if bound == "" {
+			bound = abs
+			re.roots[instanceID] = abs
+		}
+	}
+	if bound == "" {
+		return nil, errors.New("no root bound for instance")
 	}
 	m, ok := re.mgr[instanceID]
 	if !ok {
-		if root == "" {
-			return nil, errors.New("no root bound for instance")
-		}
 		var err error
-		m, err = New(root)
+		m, err = New(bound)
 		if err != nil {
 			return nil, err
 		}
 		re.mgr[instanceID] = m
-		re.roots[instanceID] = root
 	}
 	return m, nil
 }
@@ -107,14 +127,67 @@ func (m *Mgr) SafeJoin(rel string) (string, error) {
 		return "", ErrOutsideRoot
 	}
 	full := filepath.Join(m.Root, clean)
-	relBack, err := filepath.Rel(m.Root, full)
-	if err != nil {
-		return "", ErrOutsideRoot
-	}
-	if relBack == ".." || strings.HasPrefix(relBack, ".."+string(filepath.Separator)) {
-		return "", ErrOutsideRoot
+	if err := m.checkNoEscape(full); err != nil {
+		return "", err
 	}
 	return full, nil
+}
+
+// checkNoEscape enforces lexical containment plus symlink containment: if
+// the target (or its nearest existing ancestor) resolves outside Root via
+// EvalSymlinks, the path is rejected. This closes link→/etc escapes that a
+// pure Clean+Rel check misses.
+func (m *Mgr) checkNoEscape(full string) error {
+	relBack, err := filepath.Rel(m.Root, full)
+	if err != nil {
+		return ErrOutsideRoot
+	}
+	if relBack == ".." || strings.HasPrefix(relBack, ".."+string(filepath.Separator)) {
+		return ErrOutsideRoot
+	}
+	target := full
+	if _, err := os.Lstat(target); err != nil {
+		// Walk up to the nearest existing ancestor for write-new-file cases.
+		target = nearestExisting(target)
+	}
+	real, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		// Ancestor vanished mid-check or is otherwise unresolvable: deny.
+		return ErrOutsideRoot
+	}
+	rel, err := filepath.Rel(m.Root, real)
+	if err != nil {
+		return ErrOutsideRoot
+	}
+	// For new files, re-attach the non-existing tail lexically.
+	if target != full {
+		tail, err := filepath.Rel(target, full)
+		if err != nil {
+			return ErrOutsideRoot
+		}
+		real = filepath.Join(real, tail)
+		rel, err = filepath.Rel(m.Root, real)
+		if err != nil {
+			return ErrOutsideRoot
+		}
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return ErrOutsideRoot
+	}
+	return nil
+}
+
+func nearestExisting(p string) string {
+	for {
+		if _, err := os.Lstat(p); err == nil {
+			return p
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			return p
+		}
+		p = parent
+	}
 }
 
 // ensureRoot creates the root lazily so fresh instances are listable.
@@ -122,7 +195,7 @@ func (m *Mgr) ensureRoot() error {
 	return os.MkdirAll(m.Root, 0o755)
 }
 
-// List returns directory entries.
+// List returns directory entries (capped to avoid DoS on huge dirs).
 func (m *Mgr) List(rel string) (protocol.FilesListResult, error) {
 	if err := m.ensureRoot(); err != nil {
 		return protocol.FilesListResult{}, err
@@ -130,6 +203,11 @@ func (m *Mgr) List(rel string) (protocol.FilesListResult, error) {
 	full, err := m.SafeJoin(rel)
 	if err != nil {
 		return protocol.FilesListResult{}, err
+	}
+	if lst, err := os.Lstat(full); err != nil {
+		return protocol.FilesListResult{}, err
+	} else if lst.Mode()&os.ModeSymlink != 0 {
+		return protocol.FilesListResult{}, ErrOutsideRoot
 	}
 	st, err := os.Stat(full)
 	if err != nil {
@@ -144,6 +222,9 @@ func (m *Mgr) List(rel string) (protocol.FilesListResult, error) {
 	}
 	out := protocol.FilesListResult{Path: filepath.ToSlash(rel), Entries: []protocol.FileEntry{}}
 	for _, e := range entries {
+		if len(out.Entries) >= 5000 {
+			break
+		}
 		info, err := e.Info()
 		if err != nil {
 			continue // raced/deleted
@@ -164,12 +245,20 @@ func (m *Mgr) Read(rel string) (protocol.FilesReadResult, error) {
 	if err != nil {
 		return protocol.FilesReadResult{}, err
 	}
+	if lst, err := os.Lstat(full); err != nil {
+		return protocol.FilesReadResult{}, err
+	} else if lst.Mode()&os.ModeSymlink != 0 {
+		return protocol.FilesReadResult{}, ErrOutsideRoot
+	}
 	st, err := os.Stat(full)
 	if err != nil {
 		return protocol.FilesReadResult{}, err
 	}
 	if st.IsDir() {
 		return protocol.FilesReadResult{}, errors.New("cannot read a directory")
+	}
+	if !st.Mode().IsRegular() {
+		return protocol.FilesReadResult{}, errors.New("not a regular file")
 	}
 	f, err := os.Open(full)
 	if err != nil {
@@ -252,6 +341,11 @@ func (m *Mgr) Delete(rel string) error {
 	}
 	if full == m.Root {
 		return errors.New("refusing to delete the instance root")
+	}
+	if lst, err := os.Lstat(full); err != nil {
+		return err
+	} else if lst.Mode()&os.ModeSymlink != 0 {
+		return ErrOutsideRoot
 	}
 	if _, err := os.Stat(full); err != nil {
 		return err

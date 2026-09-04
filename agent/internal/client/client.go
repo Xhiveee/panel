@@ -62,6 +62,8 @@ func (c *Client) Run(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return nil
 		}
+		// session only returns on error: reset backoff on clean dials is
+		// handled inside session; here always back off.
 		slog.Warn("agent connection lost, reconnecting", "err", err, "backoff", backoff)
 		select {
 		case <-ctx.Done():
@@ -71,9 +73,6 @@ func (c *Client) Run(ctx context.Context) error {
 		backoff *= 2
 		if backoff > 30*time.Second {
 			backoff = 30 * time.Second
-		}
-		if err == nil {
-			backoff = 1 * time.Second
 		}
 	}
 }
@@ -89,6 +88,7 @@ func (c *Client) session(ctx context.Context) error {
 		return fmt.Errorf("dial: %w", err)
 	}
 	c.conn = conn
+	conn.SetReadLimit(4 << 20) // bound a single master frame (DoS guard)
 	slog.Info("connected to master", "url", c.cfg.MasterURL)
 
 	sctx, scancel := context.WithCancel(ctx)
@@ -176,6 +176,7 @@ func (c *Client) dispatch(ctx context.Context, op string, params json.RawMessage
 		if err != nil {
 			return nil, err
 		}
+		c.svcs.Files.Bind(spec.InstanceID, spec.Dir)
 		return res, nil
 
 	case protocol.OpInstanceStop:
@@ -227,6 +228,10 @@ func (c *Client) dispatch(ctx context.Context, op string, params json.RawMessage
 		// cancel is held by the master's console WS when it detaches; the
 		// goroutine above stops when the channel is closed by that cancel.
 		c.mu.Lock()
+		if old, ok := c.consoleCancel[ref.InstanceID]; ok {
+			old() // do not leak the previous stream on re-attach
+			delete(c.consoleCancel, ref.InstanceID)
+		}
 		c.consoleCancel[ref.InstanceID] = cancel
 		c.mu.Unlock()
 		return protocol.ConsoleAttachResult{Backlog: backlog}, nil
@@ -235,6 +240,9 @@ func (c *Client) dispatch(ctx context.Context, op string, params json.RawMessage
 		var in protocol.ConsoleInputParams
 		if err := decode(params, &in); err != nil {
 			return nil, err
+		}
+		if len(in.Data) > 8192 {
+			return nil, errors.New("input too large")
 		}
 		return nil, c.svcs.Runner.Input(in.InstanceID, in.Data)
 

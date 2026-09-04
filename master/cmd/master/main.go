@@ -72,6 +72,9 @@ func main() {
 	consoles.Detach = func(instanceID int64) { apiSrv.ConsoleDetach(instanceID) }
 
 	consoleWS := &ws.Handler{Hub: apiSrv.Hub, DB: database, Cons: consoles}
+	hubCtx, hubCancel := context.WithCancel(context.Background())
+	defer hubCancel()
+	hub.StartKeepalive(hubCtx)
 
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
@@ -86,8 +89,11 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           r,
+		Handler:           securityHeaders(r),
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -108,8 +114,22 @@ func main() {
 	_ = srv.Shutdown(shCtx)
 }
 
+// securityHeaders adds baseline hardening headers. TLS/HSTS itself must be
+// terminated on a reverse proxy for public installs (see README).
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:; base-uri 'self'; frame-ancestors 'none'")
+		next.ServeHTTP(w, r)
+	})
+}
+
 // bootstrapAdmin creates the initial admin account if requested via flag or
-// when the panel has no users at all.
+// when the panel has no users at all. When -create-admin names an existing
+// user (e.g. reinstall over a kept data dir), the password is reset to the
+// provided value so the installer never silently ignores the entered password.
 func bootstrapAdmin(database *db.DB, createAdmin string) error {
 	if createAdmin != "" {
 		user, pass, ok := strings.Cut(createAdmin, ":")
@@ -117,6 +137,21 @@ func bootstrapAdmin(database *db.DB, createAdmin string) error {
 			return errors.New("-create-admin must be username:password")
 		}
 		if err := createAdminUser(database, user, pass, "admin"); err != nil {
+			if isUniqueViolation(err) {
+				u, uerr := database.UserByName(user)
+				if uerr != nil {
+					return err
+				}
+				hash, herr := auth.HashPassword(pass)
+				if herr != nil {
+					return herr
+				}
+				if serr := database.SetPassword(u.ID, hash); serr != nil {
+					return serr
+				}
+				slog.Info("reset password for existing user", "username", user)
+				return nil
+			}
 			return err
 		}
 		slog.Info("created admin user", "username", user)
@@ -147,6 +182,11 @@ func createAdminUser(database *db.DB, username, password, role string) error {
 	}
 	_, err = database.CreateUser(username, hash, role)
 	return err
+}
+
+// isUniqueViolation reports SQLite UNIQUE constraint failures.
+func isUniqueViolation(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed")
 }
 
 // randomPassword generates a printable one-time bootstrap password.

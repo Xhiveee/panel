@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 )
 
 // Config is the agent configuration, persisted as JSON.
@@ -64,6 +65,13 @@ func Load() *Config {
 	if c.MasterURL == "" {
 		slog.Error("master url is required (-master or config file)")
 		os.Exit(1)
+	}
+	if !strings.HasPrefix(c.MasterURL, "ws://") && !strings.HasPrefix(c.MasterURL, "wss://") {
+		slog.Error("master url must start with ws:// or wss:// (use wss:// in production)")
+		os.Exit(1)
+	}
+	if strings.HasPrefix(c.MasterURL, "ws://") {
+		slog.Warn("master url uses cleartext ws://: bearer tokens and console traffic are sniffable; use wss:// in production")
 	}
 	if c.Token == "" {
 		slog.Error("node token is required (-token or config file); create a node in the panel first")

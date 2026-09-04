@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 )
 
 const testSecret = "test-secret"
@@ -111,6 +113,39 @@ func TestRequireAdmin(t *testing.T) {
 	protected.ServeHTTP(rec, req)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("user allowed into admin route: %d", rec.Code)
+	}
+}
+
+func TestParseTokenBadRole(t *testing.T) {
+	token, _ := IssueToken(testSecret, 1, "bob", "superadmin", time.Hour)
+	if _, err := ParseToken(testSecret, token); err == nil {
+		t.Fatal("expected error for unknown role")
+	}
+}
+
+func TestParseTokenBadSubject(t *testing.T) {
+	token, _ := IssueToken(testSecret, 0, "bob", RoleUser, time.Hour)
+	if _, err := ParseToken(testSecret, token); err == nil {
+		t.Fatal("expected error for zero subject")
+	}
+}
+
+func TestParseTokenBadIssuer(t *testing.T) {
+	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, claims{
+		Username: "bob",
+		Role:     RoleUser,
+		RegisteredClaims: jwt.RegisteredClaims{
+			Subject:   "1",
+			Issuer:    "evil-issuer",
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+		},
+	})
+	signed, err := tok.SignedString([]byte(testSecret))
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	if _, err := ParseToken(testSecret, signed); err == nil {
+		t.Fatal("expected error for wrong issuer")
 	}
 }
 

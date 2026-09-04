@@ -29,6 +29,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	if os.Geteuid() == 0 {
+		slog.Warn("agent is running as root: instance commands will execute as root; prefer a dedicated user")
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -36,6 +40,7 @@ func main() {
 	// session is live. This decouples the services from the connection lifetime.
 	var sink sink
 	r := runner.New(sink.emit)
+	r.SetBaseDir(cfg.DataDir)
 	fr := fsmgr.NewRegistry()
 	mc := metrics.NewCollector(r, sink.emit)
 	c := client.New(cfg, r, fr, mc)

@@ -81,23 +81,9 @@ func (s *Server) createInstance(w http.ResponseWriter, r *http.Request) {
 	}
 	in.Name = strings.TrimSpace(in.Name)
 	in.Dir = strings.TrimSpace(in.Dir)
-	if in.Name == "" || in.Dir == "" {
-		writeErr(w, http.StatusBadRequest, "name and dir are required")
+	if err := validateInstanceFields(in.Name, in.Dir, in.Cmd, in.Env, in.StopCmd); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
-	}
-	if len(in.Name) > 64 {
-		writeErr(w, http.StatusBadRequest, "name must be at most 64 characters")
-		return
-	}
-	if len(in.Cmd) == 0 {
-		writeErr(w, http.StatusBadRequest, "cmd is required")
-		return
-	}
-	for _, c := range in.Cmd {
-		if strings.TrimSpace(c) == "" {
-			writeErr(w, http.StatusBadRequest, "cmd must not contain empty arguments")
-			return
-		}
 	}
 	if in.NodeID <= 0 {
 		writeErr(w, http.StatusBadRequest, "valid nodeId is required")
@@ -168,6 +154,10 @@ func (s *Server) patchInstance(w http.ResponseWriter, r *http.Request) {
 	}
 	if name == "" || dir == "" || len(cmdArr) == 0 {
 		writeErr(w, http.StatusBadRequest, "name, dir and cmd must not be empty")
+		return
+	}
+	if err := validateInstanceFields(name, dir, cmdArr, envMap, stopCmd); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	ni, err := s.DB.UpdateInstance(i.ID, name, dir, cmdArr, stopCmd, envMap)
@@ -287,6 +277,9 @@ func metricsJSON(pts []metrics.Point) []metricPoint {
 func instanceSpec(i *db.Instance) protocol.InstanceSpec {
 	env := make([]string, 0, len(i.Env))
 	for k, v := range i.Env {
+		if !validEnvKey(k) {
+			continue // defense-in-depth: skip keys that bypassed validation
+		}
 		env = append(env, k+"="+v)
 	}
 	return protocol.InstanceSpec{
@@ -298,6 +291,65 @@ func instanceSpec(i *db.Instance) protocol.InstanceSpec {
 	}
 }
 
+// validateInstanceFields enforces defense-in-depth limits on stored configs.
+// The agent re-validates, but the master must reject dangerous values first.
+func validateInstanceFields(name, dir string, cmd []string, env map[string]string, stopCmd string) error {
+	if name == "" || dir == "" {
+		return errors.New("name and dir are required")
+	}
+	if len(name) > 64 {
+		return errors.New("name must be at most 64 characters")
+	}
+	if strings.ContainsRune(name, 0) || strings.ContainsRune(dir, 0) {
+		return errors.New("name/dir must not contain NUL")
+	}
+	if len(dir) > 1024 {
+		return errors.New("dir is too long")
+	}
+	if len(cmd) == 0 || len(cmd) > 32 {
+		return errors.New("cmd must have 1-32 arguments")
+	}
+	for _, c := range cmd {
+		if strings.TrimSpace(c) == "" {
+			return errors.New("cmd must not contain empty arguments")
+		}
+		if strings.ContainsRune(c, 0) || len(c) > 4096 {
+			return errors.New("invalid cmd argument")
+		}
+	}
+	if len(stopCmd) > 8192 || strings.ContainsRune(stopCmd, 0) {
+		return errors.New("stopCmd is too long")
+	}
+	if len(env) > 64 {
+		return errors.New("too many env entries")
+	}
+	for k, v := range env {
+		if !validEnvKey(k) {
+			return errors.New("invalid env key")
+		}
+		if strings.ContainsRune(v, 0) || len(v) > 8192 {
+			return errors.New("invalid env value")
+		}
+	}
+	return nil
+}
+
+// validEnvKey allows NAME-style keys only (no '=', NUL, newlines).
+func validEnvKey(k string) bool {
+	if k == "" || len(k) > 256 {
+		return false
+	}
+	for _, r := range k {
+		if r == 0 || r == '\n' || r == '\r' || r == '=' {
+			return false
+		}
+		if !(r == '_' || r >= '0' && r <= '9' || r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || r == '.') {
+			return false
+		}
+	}
+	return true
+}
+
 // mapAgentErr translates hub errors to HTTP responses.
 func (s *Server) mapAgentErr(w http.ResponseWriter, err error) {
 	switch {
@@ -306,7 +358,8 @@ func (s *Server) mapAgentErr(w http.ResponseWriter, err error) {
 	case errors.Is(err, context.DeadlineExceeded):
 		writeErr(w, http.StatusGatewayTimeout, "agent did not respond in time")
 	default:
-		writeErr(w, http.StatusBadGateway, err.Error())
+		// Do not leak agent internals (agent-controlled strings) to browsers.
+		writeErr(w, http.StatusBadGateway, "agent request failed")
 	}
 }
 

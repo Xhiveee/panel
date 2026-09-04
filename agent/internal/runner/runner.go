@@ -8,6 +8,8 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -44,8 +46,11 @@ type proc struct {
 // Runner tracks local instance processes.
 type Runner struct {
 	mu    sync.Mutex
+	opsMu sync.Mutex // serializes Start/Restart to close the Restart TOCTOU
 	procs map[int64]*proc
 	emit  EmitFunc
+
+	baseDir string // canonical DataDir; instance Dirs must stay inside
 }
 
 // New creates a Runner emitting events through emit.
@@ -53,15 +58,24 @@ func New(emit EmitFunc) *Runner {
 	return &Runner{procs: make(map[int64]*proc), emit: emit}
 }
 
+// SetBaseDir pins instance directories inside dir (canonicalized).
+func (r *Runner) SetBaseDir(dir string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.baseDir = canonicalDir(dir)
+}
+
 // Start launches the instance described by spec.
 func (r *Runner) Start(spec protocol.InstanceSpec) (protocol.StatusResult, error) {
+	r.opsMu.Lock()
+	defer r.opsMu.Unlock()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if p, ok := r.procs[spec.InstanceID]; ok && p.running.Load() {
 		return p.status(), ErrAlreadyRunning
 	}
-	if len(spec.Cmd) == 0 {
-		return protocol.StatusResult{}, errors.New("empty command")
+	if err := validateSpec(r.baseDir, spec); err != nil {
+		return protocol.StatusResult{}, err
 	}
 	if err := os.MkdirAll(spec.Dir, 0o755); err != nil {
 		return protocol.StatusResult{}, fmt.Errorf("create dir: %w", err)
@@ -180,7 +194,11 @@ func (r *Runner) Stop(instanceID int64) (protocol.StatusResult, error) {
 }
 
 // Restart stops (if needed) and starts the instance with its last spec.
+// Start/Restart are serialized via opsMu so concurrent starts cannot
+// duplicate the process.
 func (r *Runner) Restart(instanceID int64) (protocol.StatusResult, error) {
+	r.opsMu.Lock()
+	defer r.opsMu.Unlock()
 	r.mu.Lock()
 	p, ok := r.procs[instanceID]
 	spec := protocol.InstanceSpec{}
@@ -265,6 +283,9 @@ func (r *Runner) Detach(instanceID int64) {}
 
 // Input writes raw data to the instance stdin.
 func (r *Runner) Input(instanceID int64, data string) error {
+	if len(data) > 8192 {
+		return errors.New("input too large")
+	}
 	p, err := r.get(instanceID)
 	if err != nil {
 		return err
@@ -337,3 +358,69 @@ func (r *ring) snapshot() string {
 }
 
 // ---------- platform plumbing ----------
+
+// blockedEnvPrefixes are never inherited from a remote spec: they allow
+// library/shell hijack even with an innocent-looking Cmd.
+var blockedEnvPrefixes = []string{"LD_", "DYLD_", "PATH=", "PYTHONPATH=", "RUBYLIB=", "PERL5LIB=", "JAVA_TOOL_OPTIONS=", "JDK_JAVA_OPTIONS="}
+
+func canonicalDir(dir string) string {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return filepath.Clean(dir)
+	}
+	return abs
+}
+
+// insideBase reports whether target stays inside base (both canonical).
+func insideBase(base, target string) bool {
+	if base == "" {
+		return true // unpinned (tests / old wiring): validated elsewhere
+	}
+	rel, err := filepath.Rel(base, target)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// validateSpec rejects dangerous instance specs before any MkdirAll/exec.
+func validateSpec(baseDir string, spec protocol.InstanceSpec) error {
+	if len(spec.Cmd) == 0 || len(spec.Cmd) > 32 {
+		return errors.New("empty command")
+	}
+	for _, c := range spec.Cmd {
+		if strings.ContainsRune(c, 0) || len(c) > 4096 {
+			return errors.New("invalid command argument")
+		}
+	}
+	if strings.ContainsRune(spec.Dir, 0) || len(spec.Dir) == 0 || len(spec.Dir) > 1024 {
+		return errors.New("invalid dir")
+	}
+	if baseDir != "" {
+		abs, err := filepath.Abs(spec.Dir)
+		if err != nil {
+			return errors.New("invalid dir")
+		}
+		if !insideBase(baseDir, abs) {
+			return errors.New("dir is outside the agent data dir")
+		}
+	}
+	if len(spec.Env) > 64 {
+		return errors.New("too many env entries")
+	}
+	for _, kv := range spec.Env {
+		if strings.ContainsRune(kv, 0) || len(kv) > 8192 {
+			return errors.New("invalid env entry")
+		}
+		up := strings.ToUpper(kv)
+		for _, b := range blockedEnvPrefixes {
+			if strings.HasPrefix(up, b) {
+				return fmt.Errorf("blocked env entry: %s", b)
+			}
+		}
+	}
+	if len(spec.StopCmd) > 8192 || strings.ContainsRune(spec.StopCmd, 0) {
+		return errors.New("invalid stop command")
+	}
+	return nil
+}

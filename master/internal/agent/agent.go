@@ -44,10 +44,10 @@ var (
 // AgentWS upgrades and registers an agent connection. The caller must have
 // authenticated the node token; nodeID identifies the authenticated node.
 func (h *Hub) AgentWS(w http.ResponseWriter, r *http.Request, nodeID int64) {
-	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		// Agents are our own clients; origin checks do not apply.
-		OriginPatterns: []string{"*"},
-	})
+	// No OriginPatterns on purpose: non-browser agents send no Origin and
+	// are always accepted; browser cross-origin requests are rejected by
+	// default. Do not add "*".
+	conn, err := websocket.Accept(w, r, nil)
 	if err != nil {
 		return
 	}
@@ -57,6 +57,7 @@ func (h *Hub) AgentWS(w http.ResponseWriter, r *http.Request, nodeID int64) {
 		ws:      conn,
 		pending: map[string]chan protocol.Message{},
 	}
+	conn.SetReadLimit(4 << 20) // bound a single agent frame (DoS guard)
 	h.add(c)
 
 	slog.Info("agent connected", "node", nodeID, "remote", r.RemoteAddr)

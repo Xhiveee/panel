@@ -182,11 +182,16 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
-// listUserInstances returns instances assigned to a user.
+// listUserInstances returns instances assigned to a user (admin or self).
 func (s *Server) listUserInstances(w http.ResponseWriter, r *http.Request) {
 	id, err := pathID(r)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	self := requester(r)
+	if !self.IsAdmin() && id != self.ID {
+		writeErr(w, http.StatusForbidden, "cannot view another user's instances")
 		return
 	}
 	list, err := s.DB.ListInstances(id, false)
