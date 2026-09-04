@@ -64,8 +64,21 @@ install_master() {
   install -m 0644 "$SOURCE_DIR/deploy/systemd/panel-master.service" /etc/systemd/system/
 
   systemctl stop panel-master 2>/dev/null || true
+  log "Создаю администратора"
   run_as_panel /usr/local/bin/panel-master -data /var/lib/panel \
-    -create-admin "$username:$password"
+    -create-admin "$username:$password" >"$WORK_DIR/bootstrap.log" 2>&1 &
+  local bootstrap_pid=$!
+  sleep 3
+  if kill -0 "$bootstrap_pid" 2>/dev/null; then
+    kill "$bootstrap_pid" 2>/dev/null || true
+    wait "$bootstrap_pid" 2>/dev/null || true
+  else
+    wait "$bootstrap_pid" || {
+      cat "$WORK_DIR/bootstrap.log" >&2
+      die "не удалось создать администратора"
+    }
+  fi
+  cat "$WORK_DIR/bootstrap.log"
   systemctl daemon-reload
   systemctl enable --now panel-master
   log "Master установлен: http://$(hostname -I | awk '{print $1}'):8080"
