@@ -123,34 +123,20 @@ build_binary() {
 }
 
 remove_master() {
-  local delete_data
   systemctl disable --now panel-master 2>/dev/null || true
   rm -f /etc/systemd/system/panel-master.service /usr/local/bin/panel-master
+  rm -rf /var/lib/panel
   systemctl daemon-reload
-  delete_data="$(ask 'Удалить данные Master (/var/lib/panel, включая базу пользователей)? [y/N]: ' n)"
-  if [[ "$delete_data" =~ ^[YyДд]$ ]]; then
-    rm -rf /var/lib/panel
-    log "Master и его данные удалены"
-  else
-    log "Master удалён, данные сохранены в /var/lib/panel (при переустановке будет использован прежний пароль, если не задать новый)"
-  fi
-  log "Системный пользователь panel оставлен (переиспользуется при переустановке)"
+  log "Master полностью удалён: сервис, бинарник и данные (/var/lib/panel)"
 }
 
 remove_agent() {
-  local delete_data
   systemctl disable --now panel-agent 2>/dev/null || true
   rm -f /etc/systemd/system/panel-agent.service /usr/local/bin/panel-agent /etc/panel/agent.json
   rmdir /etc/panel 2>/dev/null || true
+  rm -rf /var/lib/panel-agent
   systemctl daemon-reload
-  delete_data="$(ask 'Удалить данные Agent (/var/lib/panel-agent)? [y/N]: ' n)"
-  if [[ "$delete_data" =~ ^[YyДд]$ ]]; then
-    rm -rf /var/lib/panel-agent
-    log "Agent и его данные удалены"
-  else
-    log "Agent удалён, данные сохранены в /var/lib/panel-agent"
-  fi
-  log "Системный пользователь panel оставлен (переиспользуется при переустановке)"
+  log "Agent полностью удалён: сервис, бинарник, конфиг и данные (/var/lib/panel-agent)"
 }
 
 show_master_info() {
@@ -286,6 +272,10 @@ elif [[ "$mode" == "remove-agent" ]]; then
 elif [[ "$mode" == "remove-both" ]]; then
   remove_master
   remove_agent
+  # Оба компонента снесены вместе с данными — системный пользователь больше
+  # никому не нужен, удаляем и его, чтобы не оставалось следов.
+  userdel panel 2>/dev/null || true
+  log "Системный пользователь panel удалён"
 else
   install_go
   download_source
