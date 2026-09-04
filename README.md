@@ -28,7 +28,7 @@ Master не должен напрямую управлять Docker/systemd на
 ```bash
 sudo apt update
 sudo apt install -y git golang
-git clone <URL_РЕПОЗИТОРИЯ> panel
+git clone https://github.com/Xhiveee/panel panel
 cd panel
 go build -o panel-master ./master/cmd/master
 go build -o panel-agent ./agent/cmd/agent
