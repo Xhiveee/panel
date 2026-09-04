@@ -32,15 +32,31 @@ command -v systemctl >/dev/null 2>&1 || die "не найден systemctl"
 
 mode="${1:-}"
 if [[ -z "$mode" ]]; then
-  printf 'Что установить?\n  1) Master\n  2) Agent\n'
-  choice="$(ask 'Выберите 1 или 2: ')"
+  printf '%s\n' \
+    'Master — веб-панель, API и общая авторизация.' \
+    'Agent  — локальное управление Minecraft-серверами на ноде.' \
+    '' \
+    'Что сделать?' \
+    '  1) Установить Master' \
+    '  2) Установить Agent' \
+    '  3) Установить Master и Agent' \
+    '  4) Удалить Master' \
+    '  5) Удалить Agent' \
+    '  6) Удалить Master и Agent'
+  choice="$(ask 'Выберите 1-6: ')"
   case "$choice" in
     1) mode="master" ;;
     2) mode="agent" ;;
-    *) die "выберите 1 или 2" ;;
+    3) mode="both" ;;
+    4) mode="remove-master" ;;
+    5) mode="remove-agent" ;;
+    6) mode="remove-both" ;;
+    *) die "выберите число от 1 до 6" ;;
   esac
 fi
-[[ "$mode" == "master" || "$mode" == "agent" ]] || die "выберите master или agent"
+[[ "$mode" == "master" || "$mode" == "agent" || "$mode" == "both" ||
+  "$mode" == "remove-master" || "$mode" == "remove-agent" || "$mode" == "remove-both" ]] ||
+  die "неизвестный режим: $mode"
 
 install_go() {
   local arch archive
@@ -70,11 +86,11 @@ download_source() {
 }
 
 build_binary() {
-  local output="$WORK_DIR/panel-$mode"
-  log "Собираю $mode"
+  local component="$1" output="$WORK_DIR/panel-$1"
+  log "Собираю $component"
   (
     cd "$SOURCE_DIR"
-    if [[ "$mode" == "master" ]]; then
+    if [[ "$component" == "master" ]]; then
       "$GOROOT/bin/go" build -o "$output" ./master/cmd/master
     else
       "$GOROOT/bin/go" build -o "$output" ./agent/cmd/agent
@@ -82,6 +98,34 @@ build_binary() {
   )
   [[ -x "$output" ]] || die "сборка не создала бинарник"
   printf '%s' "$output"
+}
+
+remove_master() {
+  local delete_data
+  systemctl disable --now panel-master 2>/dev/null || true
+  rm -f /etc/systemd/system/panel-master.service /usr/local/bin/panel-master
+  systemctl daemon-reload
+  delete_data="$(ask 'Удалить данные Master (/var/lib/panel)? [y/N]: ' n)"
+  if [[ "$delete_data" =~ ^[YyДд]$ ]]; then
+    rm -rf /var/lib/panel
+    log "Master и его данные удалены"
+  else
+    log "Master удалён, данные сохранены в /var/lib/panel"
+  fi
+}
+
+remove_agent() {
+  local delete_data
+  systemctl disable --now panel-agent 2>/dev/null || true
+  rm -f /etc/systemd/system/panel-agent.service /usr/local/bin/panel-agent /etc/panel/agent.json
+  systemctl daemon-reload
+  delete_data="$(ask 'Удалить данные Agent (/var/lib/panel-agent)? [y/N]: ' n)"
+  if [[ "$delete_data" =~ ^[YyДд]$ ]]; then
+    rm -rf /var/lib/panel-agent
+    log "Agent и его данные удалены"
+  else
+    log "Agent удалён, данные сохранены в /var/lib/panel-agent"
+  fi
 }
 
 install_master() {
@@ -162,11 +206,22 @@ install_agent() {
   log "Agent установлен и запущен"
 }
 
-install_go
-download_source
-BINARY="$(build_binary)"
-if [[ "$mode" == "master" ]]; then
-  install_master
+if [[ "$mode" == "remove-master" ]]; then
+  remove_master
+elif [[ "$mode" == "remove-agent" ]]; then
+  remove_agent
+elif [[ "$mode" == "remove-both" ]]; then
+  remove_master
+  remove_agent
 else
-  install_agent
+  install_go
+  download_source
+  if [[ "$mode" == "master" || "$mode" == "both" ]]; then
+    BINARY="$(build_binary master)"
+    install_master
+  fi
+  if [[ "$mode" == "agent" || "$mode" == "both" ]]; then
+    BINARY="$(build_binary agent)"
+    install_agent
+  fi
 fi
