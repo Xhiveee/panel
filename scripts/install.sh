@@ -11,6 +11,13 @@ log() { printf '\n\033[1;36m%s\033[0m\n' "$*"; }
 die() { printf '\033[1;31mОшибка: %s\033[0m\n' "$*" >&2; exit 1; }
 ask() { local prompt="$1" default="${2:-}" value; read -r -p "$prompt" value </dev/tty || true; printf '%s' "${value:-$default}"; }
 ask_secret() { local prompt="$1" value; read -r -p "$prompt" value </dev/tty || true; printf '%s' "$value"; }
+run_as_panel() {
+  if command -v runuser >/dev/null; then
+    runuser -u panel -- "$@"
+  else
+    su -s /bin/sh panel -c "$(printf '%q ' "$@")"
+  fi
+}
 
 [[ "$(id -u)" -eq 0 ]] || die "запустите скрипт через sudo"
 command -v curl >/dev/null || die "не найден curl"
@@ -57,7 +64,7 @@ install_master() {
   install -m 0644 "$SOURCE_DIR/deploy/systemd/panel-master.service" /etc/systemd/system/
 
   systemctl stop panel-master 2>/dev/null || true
-  sudo -u panel /usr/local/bin/panel-master -data /var/lib/panel \
+  run_as_panel /usr/local/bin/panel-master -data /var/lib/panel \
     -create-admin "$username:$password"
   systemctl daemon-reload
   systemctl enable --now panel-master
