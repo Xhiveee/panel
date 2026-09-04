@@ -16,7 +16,18 @@ command -v curl >/dev/null || die "не найден curl"
 command -v tar >/dev/null || die "не найден tar"
 
 install_go() {
-  command -v go >/dev/null && return
+  if command -v go >/dev/null; then
+    local version major minor
+    version="$(go version | awk '{print $3}' | sed 's/^go//')"
+    major="${version%%.*}"
+    minor="${version#*.}"
+    minor="${minor%%.*}"
+    if [[ "$major" =~ ^[0-9]+$ && "$minor" =~ ^[0-9]+$ ]] &&
+      { (( major > 1 )) || (( major == 1 && minor >= 23 )); }; then
+      return
+    fi
+    log "Найден старый Go $version, устанавливаю Go 1.23+"
+  fi
   log "Устанавливаю Go"
   if command -v apt-get >/dev/null; then
     apt-get update

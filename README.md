@@ -37,7 +37,7 @@ sudo journalctl -u panel-agent -f
 
 ## Сборка вручную
 
-Требуется Go 1.27+:
+Требуется Go 1.23+:
 
 ```bash
 go build -o panel-master ./master/cmd/master
