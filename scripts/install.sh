@@ -3,13 +3,14 @@ set -euo pipefail
 
 REPO_URL="${PANEL_REPO_URL:-https://github.com/Xhiveee/panel}"
 BRANCH="${PANEL_BRANCH:-main}"
+GO_VERSION="${PANEL_GO_VERSION:-1.23.12}"
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
 log() { printf '\n\033[1;36m%s\033[0m\n' "$*"; }
 die() { printf '\033[1;31mОшибка: %s\033[0m\n' "$*" >&2; exit 1; }
-ask() { local prompt="$1" default="${2:-}" value; read -r -p "$prompt" value; printf '%s' "${value:-$default}"; }
-ask_secret() { local prompt="$1" value; read -r -s -p "$prompt" value; printf '\n' >&2; printf '%s' "$value"; }
+ask() { local prompt="$1" default="${2:-}" value; read -r -p "$prompt" value </dev/tty || true; printf '%s' "${value:-$default}"; }
+ask_secret() { local prompt="$1" value; read -r -s -p "$prompt" value </dev/tty || true; printf '\n' >&2; printf '%s' "$value"; }
 
 [[ "$(id -u)" -eq 0 ]] || die "запустите скрипт через sudo"
 command -v curl >/dev/null || die "не найден curl"
@@ -28,17 +29,20 @@ install_go() {
     fi
     log "Найден старый Go $version, устанавливаю Go 1.23+"
   fi
-  log "Устанавливаю Go"
-  if command -v apt-get >/dev/null; then
-    apt-get update
-    apt-get install -y golang-go
-  elif command -v dnf >/dev/null; then
-    dnf install -y golang
-  elif command -v yum >/dev/null; then
-    yum install -y golang
-  else
-    die "Go не найден, а пакетный менеджер не поддерживается"
-  fi
+  log "Устанавливаю официальный Go $GO_VERSION"
+  local arch archive url
+  case "$(uname -m)" in
+    x86_64) arch="amd64" ;;
+    aarch64|arm64) arch="arm64" ;;
+    armv6l|armv7l) arch="armv6l" ;;
+    *) die "неподдерживаемая архитектура: $(uname -m)" ;;
+  esac
+  archive="go${GO_VERSION}.linux-${arch}.tar.gz"
+  url="https://go.dev/dl/${archive}"
+  curl -fsSL "$url" -o "$WORK_DIR/$archive"
+  rm -rf /usr/local/go
+  tar -C /usr/local -xzf "$WORK_DIR/$archive"
+  export PATH="/usr/local/go/bin:$PATH"
   command -v go >/dev/null || die "Go не установился"
   version="$(go version | awk '{print $3}' | sed 's/^go//')"
   major="${version%%.*}"
