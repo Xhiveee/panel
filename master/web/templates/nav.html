@@ -1,0 +1,17 @@
+{{define "navbar"}}<div class="layout">
+  <aside class="sidebar" x-data="navBar()" x-init="init()">
+    <div class="logo">PANEL</div>
+    <nav class="nav">
+      <a href="/dashboard" :class="{active: active('/dashboard')}">Дашборд</a>
+      <a href="/instances" :class="{active: active('/instances') || active('/instances/')}">Инстансы</a>
+      <a href="/nodes" x-show="show('nodes')" x-cloak :class="{active: active('/nodes')}">Ноды</a>
+      <a href="/users" x-show="show('users')" x-cloak :class="{active: active('/users')}">Пользователи</a>
+      <div class="spacer"></div>
+      <a href="/settings" :class="{active: active('/settings')}">Настройки</a>
+      <a href="#" @click.prevent="logout()" x-show="user" x-cloak>Выйти <span class="muted" x-text="user ? user.username : ''"></span></a>
+    </nav>
+  </aside>
+  <div class="main">
+{{end}}
+
+{{define "navbar-end"}}</div></div>{{end}}

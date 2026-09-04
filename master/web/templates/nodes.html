@@ -1,0 +1,90 @@
+{{define "body"}}
+{{template "navbar" .}}
+<div x-data="nodesPage()" x-init="init()">
+  <div class="row" style="margin-bottom:16px">
+    <h1 style="margin:0" class="grow">Ноды</h1>
+    <button class="btn primary" @click="openCreate()">Добавить ноду</button>
+  </div>
+
+  <div class="card">
+    <div class="empty" x-show="ready && !nodes.length">Нет нод — добавьте первую</div>
+    <table class="table" x-show="nodes.length">
+      <thead><tr><th>Имя</th><th>Статус</th><th>Последняя связь</th><th style="width:90px"></th></tr></thead>
+      <tbody>
+        <template x-for="n in nodes" :key="n.id">
+          <tr>
+            <td x-text="n.name"></td>
+            <td><span class="badge" :class="n.online ? 'ok' : ''" x-text="n.online ? 'online' : 'offline'"></span></td>
+            <td class="muted" x-text="n.lastSeen ? fmtDate(n.lastSeen) : 'никогда'"></td>
+            <td style="text-align:right"><button class="btn sm danger" @click="del(n)">Удалить</button></td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="overlay" x-show="modal" x-cloak @click.self="close()">
+    <form class="modal" @submit.prevent="create()">
+      <h2>Новая нода</h2>
+      <label>Имя</label>
+      <input x-model="form.name" required placeholder="node-1">
+      <template x-if="token">
+        <div>
+          <p class="muted" style="font-size:12.5px;margin:14px 0 4px">
+            Токен агента — скопируйте сейчас, он больше не будет показан:
+          </p>
+          <div class="code mono" x-text="token"></div>
+          <button type="button" class="btn" @click="copyToken()">Копировать токен</button>
+        </div>
+      </template>
+      <div class="row" style="margin-top:18px;justify-content:flex-end">
+        <button type="button" class="btn" @click="close()" x-text="token ? 'Закрыть' : 'Отмена'"></button>
+        <button type="submit" class="btn primary" :disabled="busy || !!token" x-show="!token">Создать</button>
+      </div>
+    </form>
+  </div>
+</div>
+{{end}}
+
+{{define "scripts"}}
+<script>
+function nodesPage() {
+  return {
+    user: null, nodes: [], ready: false,
+    modal: false, busy: false, token: '',
+    form: { name: '' },
+    async init() {
+      this.user = await guard();
+      if (!this.user) { location.href = '/login'; return; }
+      if (this.user.role !== 'admin') { location.href = '/dashboard'; return; }
+      await this.load();
+      this.timer = setInterval(() => this.load(), 5000);
+    },
+    async load() {
+      try { this.nodes = await api('/api/nodes'); this.ready = true; } catch (e) {}
+    },
+    openCreate() { this.modal = true; this.token = ''; this.form.name = ''; },
+    async create() {
+      this.busy = true;
+      try {
+        const res = await api('/api/nodes', { method: 'POST', body: { name: this.form.name } });
+        this.token = res.token;
+        await this.load();
+      } catch (e) { toast(e.message, 'err'); }
+      finally { this.busy = false; }
+    },
+    close() { this.modal = false; this.token = ''; },
+    copyToken() {
+      navigator.clipboard.writeText(this.token).then(
+        () => toast('Токен скопирован', 'ok'),
+        () => toast('Не удалось скопировать', 'err'));
+    },
+    async del(n) {
+      if (!confirm(`Удалить ноду "${n.name}"? Агенты с этим токеном потеряют доступ.`)) return;
+      try { await api('/api/nodes/' + n.id, { method: 'DELETE' }); await this.load(); }
+      catch (e) { toast(e.message, 'err'); }
+    }
+  };
+}
+</script>
+{{end}}

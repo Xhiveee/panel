@@ -1,0 +1,10 @@
+panel-data/
+agent-data/
+*.db
+*.db-shm
+*.db-wal
+jwt.secret
+agent.json
+*.exe
+*.exe~
+dist/

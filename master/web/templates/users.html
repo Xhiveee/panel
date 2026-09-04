@@ -1,0 +1,146 @@
+{{define "body"}}
+{{template "navbar" .}}
+<div x-data="usersPage()" x-init="init()">
+  <div class="row" style="margin-bottom:16px">
+    <h1 style="margin:0" class="grow">Пользователи</h1>
+    <button class="btn primary" @click="openCreate()">Создать</button>
+  </div>
+
+  <div class="card">
+    <table class="table">
+      <thead><tr><th>Логин</th><th>Роль</th><th>Инстансы</th><th>Создан</th><th style="width:230px"></th></tr></thead>
+      <tbody>
+        <template x-for="u in users" :key="u.id">
+          <tr>
+            <td x-text="u.username"></td>
+            <td><span class="badge" :class="u.role==='admin' ? 'ok' : ''" x-text="u.role"></span></td>
+            <td class="muted" x-text="u.instances != null ? u.instances.length : ''"></td>
+            <td class="muted" x-text="fmtDate(u.createdAt)"></td>
+            <td style="text-align:right">
+              <button class="btn sm" @click="openAssign(u)">Инстансы</button>
+              <button class="btn sm" @click="openPassword(u)">Пароль</button>
+              <button class="btn sm danger" @click="del(u)" x-show="u.id !== user.id">Удалить</button>
+            </td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="overlay" x-show="modal==='create'" x-cloak @click.self="modal=null">
+    <form class="modal" @submit.prevent="create()">
+      <h2>Новый пользователь</h2>
+      <label>Логин</label>
+      <input x-model="form.username" required>
+      <label>Пароль</label>
+      <input type="password" x-model="form.password" required minlength="8">
+      <label>Роль</label>
+      <select x-model="form.role">
+        <option value="user">user</option>
+        <option value="admin">admin</option>
+      </select>
+      <div class="row" style="margin-top:18px;justify-content:flex-end">
+        <button type="button" class="btn" @click="modal=null">Отмена</button>
+        <button type="submit" class="btn primary" :disabled="busy">Создать</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="overlay" x-show="modal==='password'" x-cloak @click.self="modal=null">
+    <form class="modal" @submit.prevent="savePassword()">
+      <h2>Пароль: <span x-text="target?.username"></span></h2>
+      <label>Новый пароль</label>
+      <input type="password" x-model="pw.password" required minlength="8">
+      <div class="row" style="margin-top:18px;justify-content:flex-end">
+        <button type="button" class="btn" @click="modal=null">Отмена</button>
+        <button type="submit" class="btn primary" :disabled="busy">Сохранить</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="overlay" x-show="modal==='assign'" x-cloak @click.self="modal=null">
+    <form class="modal" @submit.prevent="saveAssign()">
+      <h2>Доступ к инстансам: <span x-text="target?.username"></span></h2>
+      <div class="empty" x-show="!instances.length">Нет инстансов</div>
+      <div style="max-height:300px;overflow:auto">
+        <template x-for="i in instances" :key="i.id">
+          <label style="display:flex;align-items:center;gap:8px;margin:8px 0;color:var(--text)">
+            <input type="checkbox" style="width:auto" :value="i.id" x-model="assign.ids">
+            <span x-text="i.name"></span>
+            <span class="muted" x-text="'(' + i.nodeName + ')'"></span>
+          </label>
+        </template>
+      </div>
+      <div class="row" style="margin-top:18px;justify-content:flex-end">
+        <button type="button" class="btn" @click="modal=null">Отмена</button>
+        <button type="submit" class="btn primary" :disabled="busy">Сохранить</button>
+      </div>
+    </form>
+  </div>
+</div>
+{{end}}
+
+{{define "scripts"}}
+<script>
+function usersPage() {
+  return {
+    user: null, users: [], instances: [],
+    modal: null, busy: false, target: null,
+    form: { username: '', password: '', role: 'user' },
+    pw: { password: '' },
+    assign: { ids: [] },
+    async init() {
+      this.user = await guard();
+      if (!this.user) { location.href = '/login'; return; }
+      if (this.user.role !== 'admin') { location.href = '/dashboard'; return; }
+      await this.load();
+    },
+    async load() {
+      try {
+        this.users = await api('/api/users');
+        this.instances = (await api('/api/instances')).instances;
+      } catch (e) {}
+    },
+    openCreate() { this.form = { username: '', password: '', role: 'user' }; this.modal = 'create'; },
+    async create() {
+      this.busy = true;
+      try {
+        await api('/api/users', { method: 'POST', body: this.form });
+        this.modal = null; await this.load(); toast('Пользователь создан', 'ok');
+      } catch (e) { toast(e.message, 'err'); }
+      finally { this.busy = false; }
+    },
+    openPassword(u) { this.target = u; this.pw = { password: '' }; this.modal = 'password'; },
+    async savePassword() {
+      this.busy = true;
+      try {
+        await api(`/api/users/${this.target.id}/password`, { method: 'PUT', body: this.pw });
+        this.modal = null; toast('Пароль обновлён', 'ok');
+      } catch (e) { toast(e.message, 'err'); }
+      finally { this.busy = false; }
+    },
+    async openAssign(u) {
+      this.target = u; this.assign = { ids: [] };
+      try { this.assign.ids = (await api(`/api/users/${u.id}/instances`)).map(i => i.id); } catch (e) {}
+      this.modal = 'assign';
+    },
+    async saveAssign() {
+      this.busy = true;
+      try {
+        await api(`/api/users/${this.target.id}/instances`, {
+          method: 'PUT',
+          body: { ids: this.assign.ids.map(x => parseInt(x, 10)) }
+        });
+        this.modal = null; await this.load(); toast('Доступ обновлён', 'ok');
+      } catch (e) { toast(e.message, 'err'); }
+      finally { this.busy = false; }
+    },
+    async del(u) {
+      if (!confirm(`Удалить пользователя "${u.username}"?`)) return;
+      try { await api('/api/users/' + u.id, { method: 'DELETE' }); await this.load(); }
+      catch (e) { toast(e.message, 'err'); }
+    }
+  };
+}
+</script>
+{{end}}

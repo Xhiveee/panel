@@ -1,0 +1,128 @@
+{{define "body"}}
+<div x-data="dashboardPage()" x-init="init()">
+  <h1>Дашборд</h1>
+  <div class="grid" style="grid-template-columns:repeat(4,1fr)">
+    <div class="card"><div class="muted" style="font-size:12.5px">Инстансы</div><div class="stat-num" x-text="totals.instances"></div>
+      <div class="muted" style="font-size:12px"><span x-text="totals.running"></span> запущено</div></div>
+    <div class="card"><div class="muted" style="font-size:12.5px">Ноды онлайн</div><div class="stat-num" x-text="totals.nodesOnline"></div>
+      <div class="muted" style="font-size:12px">из <span x-text="totals.nodes"></span></div></div>
+    <div class="card" style="grid-column:span 2">
+      <div class="muted" style="font-size:12.5px">CPU / RAM ноды</div>
+      <div class="row" style="margin-top:10px;gap:24px">
+        <div><div class="stat-num" style="margin:0"><span x-text="fmt1(node.cpu)"></span>%</div><div class="muted" style="font-size:12px">CPU</div></div>
+        <div><div class="stat-num" style="margin:0"><span x-text="fmtGB(node.memUsed)"></span> ГБ</div><div class="muted" style="font-size:12px">RAM занято</div></div>
+        <div x-show="node.memTotal"><div class="stat-num" style="margin:0"><span x-text="fmtGB(node.memTotal)"></span> ГБ</div><div class="muted" style="font-size:12px">RAM всего</div></div>
+      </div>
+    </div>
+  </div>
+
+  <h2 style="margin-top:26px">Инстансы</h2>
+  <div class="card">
+    <div class="empty" x-show="!instances.length">Нет доступных инстансов</div>
+    <table class="table" x-show="instances.length">
+      <thead><tr><th>Название</th><th>Нода</th><th>Статус</th><th style="width:220px"></th></tr></thead>
+      <tbody>
+        <template x-for="i in instances" :key="i.id">
+          <tr>
+            <td><a :href="'/instances/'+i.id" style="font-weight:600" x-text="i.name"></a></td>
+            <td class="muted" x-text="i.nodeName"></td>
+            <td><span class="badge" :class="statusClass(i)" x-text="statusText(i)"></span></td>
+            <td>
+              <div class="row">
+                <button class="btn sm" @click="power(i,'start')" :disabled="!i.nodeOnline || i.running">Старт</button>
+                <button class="btn sm" @click="power(i,'stop')" :disabled="!i.nodeOnline || !i.running">Стоп</button>
+                <button class="btn sm" @click="power(i,'restart')" :disabled="!i.nodeOnline">Рестарт</button>
+              </div>
+            </td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+  </div>
+
+  <template x-if="isAdmin">
+    <div>
+      <h2 style="margin-top:26px">Последние события</h2>
+      <div class="card">
+        <div class="empty" x-show="!audit.length">Событий пока нет</div>
+        <table class="table" x-show="audit.length">
+          <thead><tr><th style="width:160px">Время</th><th style="width:140px">Пользователь</th><th style="width:180px">Действие</th><th>Детали</th></tr></thead>
+          <tbody>
+            <template x-for="a in audit" :key="a.id">
+              <tr>
+                <td class="muted mono" x-text="fmtDate(a.ts)"></td>
+                <td x-text="a.username"></td>
+                <td class="mono" x-text="a.action"></td>
+                <td class="muted" x-text="[a.target, a.detail].filter(Boolean).join(' — ')"></td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </template>
+</div>
+{{end}}
+
+{{define "scripts"}}
+<script>
+function dashboardPage() {
+  return {
+    totals: { instances: 0, running: 0, nodes: 0, nodesOnline: 0 },
+    instances: [], audit: [],
+    node: { cpu: 0, memUsed: 0, memTotal: 0 },
+    isAdmin: false, timer: null,
+    async init() {
+      const u = await guard();
+      if (!u) return;
+      this.isAdmin = u.role === 'admin';
+      await this.load();
+      this.timer = setInterval(() => this.load(), 5000);
+    },
+    async load() {
+      try {
+        const data = await api('/api/instances');
+        this.instances = data.instances || [];
+        this.totals.instances = this.instances.length;
+        this.totals.running = this.instances.filter(i => i.running).length;
+        if (this.isAdmin) {
+          const [nodes, { audit }] = await Promise.all([api('/api/nodes'), api('/api/audit?limit=8')]);
+          this.totals.nodes = nodes.length;
+          this.totals.nodesOnline = nodes.filter(n => n.online).length;
+          this.audit = audit || [];
+          const online = nodes.find(n => n.online);
+          if (online) this.fetchNode(online.id); else this.node = { cpu: 0, memUsed: 0, memTotal: 0 };
+        }
+      } catch (e) { /* polling errors are transient */ }
+    },
+    async fetchNode(nodeId) {
+      try {
+        const m = await api('/api/metrics/node/' + nodeId);
+        if (m.node.length) {
+          const p = m.node[m.node.length - 1];
+          this.node = { cpu: p.a, memUsed: p.b, memTotal: m.memTotal || 0 };
+        }
+      } catch (e) { /* ignore */ }
+    },
+    async power(i, action) {
+      try {
+        await api(`/api/instances/${i.id}/${action}`, { method: 'POST' });
+        toast('OK: ' + action, 'ok');
+        await this.load();
+      } catch (e) { toast(e.message, 'err'); }
+    },
+    statusText(i) {
+      if (!i.nodeOnline) return 'нода оффлайн';
+      return i.running ? 'запущен' : 'остановлен';
+    },
+    statusClass(i) {
+      if (!i.nodeOnline) return 'err';
+      return i.running ? 'ok' : '';
+    },
+    fmtDate(ts) { return new Date(ts * 1000).toLocaleString(); },
+    fmt1(v) { return (Math.round((v || 0) * 10) / 10).toFixed(1); },
+    fmtGB(b) { return ((b || 0) / 1073741824).toFixed(1); }
+  };
+}
+</script>
+{{end}}

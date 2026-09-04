@@ -1,0 +1,367 @@
+{{define "body"}}
+{{template "navbar" .}}
+<div x-data="instancePage()" x-init="init()">
+  <div class="row" style="margin-bottom:10px">
+    <h1 style="margin:0" x-text="inst?.name || '…'"></h1>
+    <span class="badge" :class="inst?.nodeOnline ? (inst.running ? 'ok' : '') : 'err'"
+          x-show="inst"
+          x-text="inst?.nodeOnline ? (inst.running ? 'running' : 'stopped') : 'node offline'"></span>
+    <div class="grow"></div>
+    <span class="muted" x-show="inst" x-text="inst?.nodeName"></span>
+  </div>
+
+  <div class="tabs">
+    <button :class="{active: tab==='console'}" @click="tab='console'; initConsole()">Консоль</button>
+    <button :class="{active: tab==='files'}" @click="tab='files'; initFiles()">Файлы</button>
+    <button :class="{active: tab==='metrics'}" @click="tab='metrics'; initMetrics()">Метрики</button>
+    <button x-show="user?.role==='admin'" :class="{active: tab==='settings'}" @click="tab='settings'">Настройки</button>
+  </div>
+
+  <!-- CONSOLE -->
+  <div x-show="tab==='console'">
+    <div class="row" style="margin-bottom:10px">
+      <button class="btn sm" @click="power('start')" :disabled="inst?.running || !inst?.nodeOnline">Start</button>
+      <button class="btn sm" @click="power('stop')" :disabled="!inst?.running">Stop</button>
+      <button class="btn sm" @click="power('restart')" :disabled="!inst?.nodeOnline">Restart</button>
+      <div class="grow"></div>
+      <span class="badge" x-show="wsState" x-text="wsState"></span>
+    </div>
+    <div class="term-box" id="term"></div>
+  </div>
+
+  <!-- FILES -->
+  <div x-show="tab==='files'" x-cloak>
+    <div class="row" style="margin-bottom:10px">
+      <div class="crumbs mono">
+        <a href="#" @click.prevent="openPath('')">root</a>
+        <template x-for="(seg, idx) in pathSegs" :key="idx">
+          <span> / <a href="#" @click.prevent="openPath(pathSegs.slice(0, idx+1).join('/'))" x-text="seg"></a></span>
+        </template>
+      </div>
+      <div class="grow"></div>
+      <button class="btn sm" @click="newFolder()">+ Папка</button>
+      <button class="btn sm" @click="newFile()">+ Файл</button>
+      <label class="btn sm">Загрузить<input type="file" style="display:none" @change="upload($event)"></label>
+      <button class="btn sm" @click="refreshFiles()">↻</button>
+    </div>
+    <div class="card" style="padding:0">
+      <table class="table">
+        <thead><tr><th style="width:38px"></th><th>Имя</th><th style="width:110px">Размер</th><th style="width:170px">Изменён</th><th style="width:130px"></th></tr></thead>
+        <tbody>
+          <tr x-show="pathSegs.length">
+            <td>📁</td>
+            <td><a href="#" style="color:var(--muted)" @click.prevent="openPath(pathSegs.slice(0,-1).join('/'))">..</a></td>
+            <td colspan="3"></td>
+          </tr>
+          <template x-for="f in files" :key="f.name">
+            <tr>
+              <td x-text="f.isDir ? '📁' : '📄'"></td>
+              <td>
+                <a href="#" style="color:#fff" x-show="f.isDir" @click.prevent="openPath(joinPath(f.name))" x-text="f.name"></a>
+                <a href="#" style="color:#fff" x-show="!f.isDir" @click.prevent="editFile(f.name)" x-text="f.name"></a>
+              </td>
+              <td class="muted mono" x-text="f.isDir ? '—' : fmtBytes(f.size)"></td>
+              <td class="muted mono" x-text="fmtDate(f.modTime)"></td>
+              <td style="text-align:right">
+                <button class="btn sm" x-show="!f.isDir" @click="editFile(f.name)">Изм.</button>
+                <button class="btn sm danger" @click="delFile(f)">Удал.</button>
+              </td>
+            </tr>
+          </template>
+          <tr x-show="!files.length && !loadingFiles"><td colspan="5" class="empty">Пусто</td></tr>
+          <tr x-show="loadingFiles"><td colspan="5" class="empty">Загрузка…</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="err-text" x-show="filesError" x-text="filesError"></p>
+  </div>
+
+  <!-- METRICS -->
+  <div x-show="tab==='metrics'" x-cloak>
+    <div class="grid" style="grid-template-columns:1fr 1fr">
+      <div class="card">
+        <h2>CPU, %</h2>
+        <div id="cpuChart"></div>
+        <div class="row" style="gap:16px;margin-top:8px">
+          <span class="muted"><span style="color:#f2f2f2">■</span> инстанс</span>
+          <span class="muted"><span style="color:#8a8a92">■</span> нода</span>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Память, МБ</h2>
+        <div id="memChart"></div>
+        <div class="row" style="gap:16px;margin-top:8px">
+          <span class="muted"><span style="color:#f2f2f2">■</span> RSS инстанса</span>
+          <span class="muted"><span style="color:#8a8a92">■</span> used ноды</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SETTINGS -->
+  <div x-show="tab==='settings'" x-cloak>
+    <div class="card" style="max-width:560px" x-show="inst">
+      <h2>Параметры инстанса</h2>
+      <label>Имя</label>
+      <input x-model="form.name">
+      <label>Директория</label>
+      <input x-model="form.dir" class="mono">
+      <label>Команда запуска</label>
+      <input x-model="form.cmd" class="mono">
+      <label>Stop-команда</label>
+      <input x-model="form.stopCmd" class="mono">
+      <label>Env (K=V на строку)</label>
+      <textarea x-model="form.env" rows="2" class="mono"></textarea>
+      <div class="row" style="margin-top:16px">
+        <button class="btn danger" @click="del()">Удалить инстанс</button>
+        <div class="grow"></div>
+        <button class="btn primary" :disabled="busy" @click="save()" x-text="busy ? '…' : 'Сохранить'"></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- file edit modal -->
+  <div class="overlay" x-show="editor.open" x-cloak @click.self="editor.open=false">
+    <div class="modal" style="width:760px">
+      <div class="row">
+        <h2 style="margin:0" class="mono" x-text="editor.path"></h2>
+        <div class="grow"></div>
+        <span class="badge warn" x-show="editor.truncated">файл усечён</span>
+      </div>
+      <textarea x-model="editor.content" rows="20" class="mono" style="margin-top:10px;white-space:pre;overflow:auto"></textarea>
+      <p class="err-text" x-show="editor.error" x-text="editor.error"></p>
+      <div class="row" style="margin-top:12px">
+        <button class="btn" @click="editor.open=false">Отмена</button>
+        <div class="grow"></div>
+        <button class="btn primary" :disabled="editor.busy" @click="saveFile()" x-text="editor.busy ? '…' : 'Сохранить'"></button>
+      </div>
+    </div>
+  </div>
+</div>
+{{end}}
+
+{{define "scripts"}}
+<script src="/static/js/vendor/xterm.min.js"></script>
+<script src="/static/js/vendor/xterm-addon-fit.min.js"></script>
+<script src="/static/js/vendor/uplot.min.js"></script>
+<script>
+function instancePage() {
+  const id = parseInt(location.pathname.split('/').pop(), 10) || 0;
+  return {
+    id, user: null, inst: null, tab: 'console', busy: false, wsState: '',
+    form: { name: '', dir: '', cmd: '', stopCmd: '', env: '' },
+
+    // console state
+    term: null, fitAddon: null, ws: null, consoleInited: false,
+
+    // files state
+    files: [], pathSegs: [], loadingFiles: false, filesError: '',
+    editor: { open: false, path: '', content: '', truncated: false, busy: false, error: '' },
+
+    // metrics state
+    cpuChart: null, memChart: null, metricsTimer: null,
+
+    async init() {
+      this.user = await guard();
+      if (!this.user) { location.href = '/login'; return; }
+      try {
+        const r = await api('/api/instances/' + this.id);
+        this.inst = r.instance;
+        this.form = {
+          name: this.inst.name, dir: this.inst.dir,
+          cmd: (this.inst.cmd || []).join(' '),
+          stopCmd: this.inst.stopCmd || '',
+          env: Object.entries(this.inst.env || {}).map(([k, v]) => k + '=' + v).join('\n'),
+        };
+      } catch (e) { toast(e.message, 'err'); return; }
+      this.statusTimer = setInterval(() => this.refreshStatus(), 5000);
+      this.initConsole();
+    },
+
+    async refreshStatus() {
+      try { this.inst = (await api('/api/instances/' + this.id)).instance; }
+      catch (e) { /* transient */ }
+    },
+
+    async power(op) {
+      try {
+        await api(`/api/instances/${this.id}/${op}`, { method: 'POST' });
+        toast(op + ' ok', 'ok');
+        await this.refreshStatus();
+      } catch (e) { toast(e.message, 'err'); }
+    },
+
+    // ---------- console ----------
+    initConsole() {
+      if (this.consoleInited) return;
+      this.consoleInited = true;
+      const el = document.getElementById('term');
+      this.term = new Terminal({
+        cursorBlink: true, fontSize: 13, fontFamily: 'Consolas, monospace',
+        theme: { background: '#000', foreground: '#e8e8e8', cursor: '#ffffff' },
+        scrollback: 5000,
+      });
+      this.fitAddon = new FitAddon.FitAddon();
+      this.term.loadAddon(this.fitAddon);
+      this.term.open(el);
+      this.term.writeln('\x1b[90mПодключение к консоли…\x1b[0m');
+      this.connectWS();
+      new ResizeObserver(() => this.fitAddon.fit()).observe(el);
+      this.term.onData(d => {
+        if (this.ws && this.ws.readyState === 1)
+          this.ws.send(JSON.stringify({ type: 'input', data: d }));
+      });
+    },
+    connectWS() {
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      this.wsState = 'connecting…';
+      const ws = new WebSocket(`${proto}://${location.host}/api/ws/instance/${this.id}`);
+      this.ws = ws;
+      ws.onopen = () => { this.wsState = ''; this.term.write(''); };
+      ws.onmessage = e => {
+        const m = JSON.parse(e.data);
+        if (m.type === 'output') this.term.write(m.data);
+        else if (m.type === 'error') this.term.write('\r\n\x1b[31m' + (m.error || 'error') + '\x1b[0m\r\n');
+      };
+      ws.onclose = () => {
+        this.wsState = 'reconnecting…';
+        setTimeout(() => { if (this.ws === ws) this.connectWS(); }, 3000);
+      };
+    },
+
+    // ---------- files ----------
+    get path() { return this.pathSegs.join('/'); },
+    joinPath(name) { return this.pathSegs.concat([name]).join('/'); },
+    async initFiles() {
+      if (!this.pathSegs.length) await this.refreshFiles();
+    },
+    async refreshFiles() {
+      this.loadingFiles = true; this.filesError = '';
+      try {
+        const r = await api(`/api/instances/${this.id}/files/list`, { method: 'POST', body: { path: this.path } });
+        this.files = (r.entries || []).sort((a, b) =>
+          (b.isDir - a.isDir) || a.name.localeCompare(b.name));
+      } catch (e) { this.filesError = e.message; }
+      finally { this.loadingFiles = false; }
+    },
+    async openPath(p) { this.pathSegs = p ? p.split('/') : []; await this.refreshFiles(); },
+    async editFile(name) {
+      const p = this.joinPath(name);
+      this.editor = { open: true, path: p, content: '', truncated: false, busy: false, error: '' };
+      try {
+        const r = await api(`/api/instances/${this.id}/files/read`, { method: 'POST', body: { path: p } });
+        this.editor.content = b64decode(r.contentB64);
+        this.editor.truncated = !!r.truncated;
+      } catch (e) { this.editor.error = e.message; }
+    },
+    async saveFile() {
+      this.editor.busy = true; this.editor.error = '';
+      try {
+        await api(`/api/instances/${this.id}/files/write`, {
+          method: 'POST', body: { path: this.editor.path, contentB64: b64encode(this.editor.content) }
+        });
+        toast('Сохранено', 'ok');
+        this.editor.open = false;
+        await this.refreshFiles();
+      } catch (e) { this.editor.error = e.message; }
+      finally { this.editor.busy = false; }
+    },
+    async newFolder() {
+      const name = window.prompt('Имя папки:');
+      if (!name) return;
+      try {
+        await api(`/api/instances/${this.id}/files/mkdir`, { method: 'POST', body: { path: this.joinPath(name) } });
+        await this.refreshFiles();
+      } catch (e) { toast(e.message, 'err'); }
+    },
+    async newFile() {
+      const name = window.prompt('Имя файла:');
+      if (!name) return;
+      try {
+        await api(`/api/instances/${this.id}/files/write`, {
+          method: 'POST', body: { path: this.joinPath(name), contentB64: '' }
+        });
+        await this.refreshFiles();
+      } catch (e) { toast(e.message, 'err'); }
+    },
+    async upload(ev) {
+      const f = ev.target.files[0];
+      ev.target.value = '';
+      if (!f) return;
+      if (f.size > 8 * 1024 * 1024) { toast('Максимум 8 МБ', 'err'); return; }
+      try {
+        await api(`/api/instances/${this.id}/files/write`, {
+          method: 'POST', body: { path: this.joinPath(f.name), contentB64: await fileToB64(f) }
+        });
+        toast('Загружено', 'ok');
+        await this.refreshFiles();
+      } catch (e) { toast(e.message, 'err'); }
+    },
+    async delFile(f) {
+      if (!confirmDlg(`Удалить "${f.name}"${f.isDir ? ' и всё содержимое' : ''}?`)) return;
+      try {
+        await api(`/api/instances/${this.id}/files/delete`, { method: 'POST', body: { path: this.joinPath(f.name) } });
+        await this.refreshFiles();
+      } catch (e) { toast(e.message, 'err'); }
+    },
+
+    // ---------- metrics ----------
+    initMetrics() {
+      if (this.metricsTimer) return;
+      const opts = { width: 0, height: 220, legend: { show: false }, cursor: { pts: { show: false } } };
+      this.cpuChart = new uPlot({
+        ...opts, series: [{}, { stroke: '#f2f2f2', width: 1.5, label: 'инстанс' }, { stroke: '#8a8a92', width: 1.5, label: 'нода' }],
+      }, null, document.getElementById('cpuChart'));
+      this.memChart = new uPlot({
+        ...opts, series: [{}, { stroke: '#f2f2f2', width: 1.5, label: 'rss' }, { stroke: '#8a8a92', width: 1.5, label: 'node used' }],
+      }, null, document.getElementById('memChart'));
+      const tick = async () => {
+        try {
+          const r = await api(`/api/instances/${this.id}/metrics`);
+          const t = r.instance.map(p => p.t / 1000);
+          const cpu = [t, r.instance.map(p => p.a), r.node.map(p => p.a)];
+          const mem = [t, r.instance.map(p => p.b / 1048576), r.node.map(p => p.b / 1048576)];
+          if (t.length) {
+            this.cpuChart.setSize({ width: document.getElementById('cpuChart').clientWidth });
+            this.memChart.setSize({ width: document.getElementById('memChart').clientWidth });
+            this.cpuChart.setData(cpu);
+            this.memChart.setData(mem);
+          }
+        } catch (e) { /* transient */ }
+      };
+      tick();
+      this.metricsTimer = setInterval(tick, 3000);
+    },
+
+    // ---------- settings ----------
+    async save() {
+      this.busy = true;
+      const env = {};
+      for (const line of (this.form.env || '').split('\n')) {
+        const i = line.indexOf('=');
+        if (i > 0) env[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+      }
+      try {
+        const r = await api('/api/instances/' + this.id, {
+          method: 'PATCH',
+          body: {
+            name: this.form.name, dir: this.form.dir,
+            cmd: splitCmd(this.form.cmd), stopCmd: this.form.stopCmd, env
+          }
+        });
+        this.inst = r.instance;
+        toast('Сохранено', 'ok');
+      } catch (e) { toast(e.message, 'err'); }
+      finally { this.busy = false; }
+    },
+    async del() {
+      if (!confirmDlg('Удалить инстанс? Инстанс будет остановлен и удалён из панели.')) return;
+      try {
+        await api('/api/instances/' + this.id, { method: 'DELETE' });
+        location.href = '/instances';
+      } catch (e) { toast(e.message, 'err'); }
+    }
+  };
+}
+</script>
+{{end}}

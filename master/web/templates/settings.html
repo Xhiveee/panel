@@ -1,0 +1,44 @@
+{{define "body"}}
+{{template "navbar" .}}
+<div x-data="settingsPage()" x-init="init()">
+  <h1>Настройки</h1>
+  <div class="card" style="max-width:420px">
+    <h2>Смена пароля</h2>
+    <form @submit.prevent="changePassword()">
+      <label>Текущий пароль</label>
+      <input type="password" x-model="pw.old" required>
+      <label>Новый пароль (мин. 8 символов)</label>
+      <input type="password" x-model="pw.new" required minlength="8">
+      <div class="row" style="margin-top:18px">
+        <button type="submit" class="btn primary" :disabled="busy">Сохранить</button>
+      </div>
+    </form>
+  </div>
+</div>
+{{end}}
+
+{{define "scripts"}}
+<script>
+function settingsPage() {
+  return {
+    user: null, pw: { old: '', new: '' }, busy: false,
+    async init() {
+      this.user = await guard();
+      if (!this.user) { location.href = '/login'; return; }
+    },
+    async changePassword() {
+      this.busy = true;
+      try {
+        await api(`/api/users/${this.user.id}/password`, {
+          method: 'PUT',
+          body: { oldPassword: this.pw.old, newPassword: this.pw.new }
+        });
+        toast('Пароль изменён', 'ok');
+        this.pw = { old: '', new: '' };
+      } catch (e) { toast(e.message, 'err'); }
+      finally { this.busy = false; }
+    }
+  };
+}
+</script>
+{{end}}

@@ -1,0 +1,117 @@
+{{define "body"}}
+{{template "navbar" .}}
+<div x-data="instancesPage()" x-init="init()">
+  <div class="row" style="margin-bottom:16px">
+    <h1 style="margin:0" class="grow">Инстансы</h1>
+    <button class="btn primary" x-show="user?.role==='admin'" @click="openCreate()">Создать</button>
+  </div>
+
+  <div class="card">
+    <div class="empty" x-show="ready && !instances.length">Нет инстансов</div>
+    <table class="table" x-show="instances.length">
+      <thead><tr><th>Имя</th><th>Нода</th><th>Директория</th><th>Статус</th><th style="width:150px"></th></tr></thead>
+      <tbody>
+        <template x-for="i in instances" :key="i.id">
+          <tr>
+            <td><a :href="'/instances/'+i.id" style="color:#fff" x-text="i.name"></a></td>
+            <td class="muted" x-text="i.nodeName"></td>
+            <td class="muted mono" x-text="i.dir"></td>
+            <td>
+              <span class="badge" :class="i.nodeOnline ? (i.running ? 'ok' : '') : 'err'"
+                    x-text="i.nodeOnline ? (i.running ? 'running' : 'stopped') : 'node offline'"></span>
+            </td>
+            <td style="text-align:right">
+              <button class="btn sm" x-show="user?.role==='admin'" @click="toggle(i)"
+                      x-text="i.running ? 'Stop' : 'Start'"></button>
+              <a class="btn sm" :href="'/instances/'+i.id">Открыть</a>
+            </td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="overlay" x-show="modal" x-cloak @click.self="modal=false">
+    <form class="modal" @submit.prevent="create()">
+      <h2>Новый инстанс</h2>
+      <label>Имя</label>
+      <input x-model="form.name" required placeholder="survival">
+      <label>Нода</label>
+      <select x-model="form.nodeId" required>
+        <option value="" disabled>Выберите ноду</option>
+        <template x-for="n in nodes" :key="n.id">
+          <option :value="n.id" x-text="n.name + (n.online ? ' (online)' : ' (offline)')"></option>
+        </template>
+      </select>
+      <label>Директория на ноде</label>
+      <input x-model="form.dir" required placeholder="C:/mc/survival или /opt/mc/survival">
+      <label>Команда запуска</label>
+      <input x-model="form.cmd" required placeholder="java -Xmx2G -jar server.jar nogui">
+      <label>Stop-команда (в консоль; пусто = terminate)</label>
+      <input x-model="form.stopCmd" placeholder="stop">
+      <label>Переменные окружения (K=V, по одной в строке)</label>
+      <textarea x-model="form.env" rows="3"></textarea>
+      <div class="row" style="margin-top:18px;justify-content:flex-end">
+        <button type="button" class="btn" @click="modal=false">Отмена</button>
+        <button type="submit" class="btn primary" :disabled="busy">Создать</button>
+      </div>
+    </form>
+  </div>
+</div>
+{{end}}
+
+{{define "scripts"}}
+<script>
+function instancesPage() {
+  return {
+    user: null, instances: [], nodes: [], ready: false,
+    modal: false, busy: false,
+    form: { name: '', nodeId: '', dir: '', cmd: '', stopCmd: '', env: '' },
+    async init() {
+      this.user = await guard();
+      if (!this.user) { location.href = '/login'; return; }
+      await this.load();
+      this.timer = setInterval(() => this.load(), 5000);
+    },
+    async load() {
+      try {
+        const { instances } = await api('/api/instances');
+        this.instances = instances;
+        this.ready = true;
+        if (this.user.role === 'admin' && !this.nodes.length) {
+          this.nodes = await api('/api/nodes');
+        }
+      } catch (e) { /* временные ошибки сети */ }
+    },
+    openCreate() { this.modal = true; },
+    async create() {
+      this.busy = true;
+      try {
+        const { id } = await api('/api/instances', {
+          method: 'POST',
+          body: {
+            name: this.form.name,
+            nodeId: parseInt(this.form.nodeId, 10),
+            dir: this.form.dir,
+            cmd: splitCmd(this.form.cmd),
+            stopCmd: this.form.stopCmd,
+            env: parseEnvText(this.form.env),
+          }
+        });
+        this.modal = false;
+        location.href = '/instances/' + id;
+      } catch (e) { toast(e.message, 'err'); }
+      finally { this.busy = false; }
+    },
+    async toggle(i) {
+      const op = i.running ? 'stop' : 'start';
+      try {
+        await api(`/api/instances/${i.id}/${op}`, { method: 'POST' });
+        toast(`${i.name}: ${op} ok`, 'ok');
+        await this.load();
+      } catch (e) { toast(e.message, 'err'); }
+    }
+  };
+}
+</script>
+{{end}}

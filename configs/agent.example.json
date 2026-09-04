@@ -1,0 +1,6 @@
+{
+  "masterUrl": "ws://localhost:8080/api/agent/ws",
+  "token": "REPLACE_WITH_NODE_TOKEN",
+  "dataDir": "/var/lib/panel-agent",
+  "name": "node-1"
+}

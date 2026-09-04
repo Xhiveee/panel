@@ -1,0 +1,40 @@
+{{/* The login page renders without the sidebar, so it closes no wrappers. */}}
+{{define "navbar-end"}}{{end}}
+
+{{define "body"}}
+<div class="login-wrap" x-data="loginPage()" x-init="init()">
+  <form class="login-box" @submit.prevent="submit()">
+    <h1>Panel</h1>
+    <p class="muted" style="margin:0 0 16px;font-size:13px">Управление Minecraft-серверами</p>
+    <label>Логин</label>
+    <input x-model="username" autocomplete="username" autofocus>
+    <label>Пароль</label>
+    <input type="password" x-model="password" autocomplete="current-password">
+    <p class="err-text" x-show="error" x-text="error" style="margin:10px 0 0"></p>
+    <button class="btn primary" type="submit" style="width:100%;margin-top:18px" :disabled="busy"
+      x-text="busy ? 'Вход…' : 'Войти'"></button>
+  </form>
+</div>
+{{end}}
+
+{{define "scripts"}}
+<script>
+function loginPage() {
+  return {
+    username: '', password: '', error: '', busy: false,
+    async init() {
+      if (await guard()) location.href = '/dashboard';
+    },
+    async submit() {
+      this.busy = true; this.error = '';
+      try {
+        await api('/api/auth/login', { method: 'POST', body: { username: this.username, password: this.password } });
+        location.href = '/dashboard';
+      } catch (e) {
+        this.error = 'Неверный логин или пароль';
+      } finally { this.busy = false; }
+    }
+  };
+}
+</script>
+{{end}}

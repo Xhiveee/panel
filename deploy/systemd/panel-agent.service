@@ -1,0 +1,19 @@
+-- Panel agent systemd unit (production Linux deploy).
+[Unit]
+Description=Panel agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=panel
+Group=panel
+ExecStart=/usr/local/bin/panel-agent -config /etc/panel/agent.json
+Restart=always
+RestartSec=3
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
