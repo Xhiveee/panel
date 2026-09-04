@@ -7,7 +7,7 @@
 
 Запустите на сервере master или agent:
 
-Под `root` выполните (ссылка на конкретную проверенную ревизию):
+Под `root` выполните:
 
 ```bash
 curl -fsSL https://github.com/Xhiveee/panel/raw/main/scripts/install.sh | bash
