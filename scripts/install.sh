@@ -17,19 +17,7 @@ command -v curl >/dev/null || die "не найден curl"
 command -v tar >/dev/null || die "не найден tar"
 
 install_go() {
-  if command -v go >/dev/null; then
-    local version major minor
-    version="$(go version | awk '{print $3}' | sed 's/^go//')"
-    major="${version%%.*}"
-    minor="${version#*.}"
-    minor="${minor%%.*}"
-    if [[ "$major" =~ ^[0-9]+$ && "$minor" =~ ^[0-9]+$ ]] &&
-      { (( major > 1 )) || (( major == 1 && minor >= 23 )); }; then
-      return
-    fi
-    log "Найден старый Go $version, устанавливаю Go 1.23+"
-  fi
-  log "Устанавливаю официальный Go $GO_VERSION"
+  log "Скачиваю Go $GO_VERSION в локальный каталог установки"
   local arch archive url
   case "$(uname -m)" in
     x86_64) arch="amd64" ;;
@@ -40,18 +28,12 @@ install_go() {
   archive="go${GO_VERSION}.linux-${arch}.tar.gz"
   url="https://go.dev/dl/${archive}"
   curl -fsSL "$url" -o "$WORK_DIR/$archive"
-  rm -rf /usr/local/go
-  tar -C /usr/local -xzf "$WORK_DIR/$archive"
-  export PATH="/usr/local/go/bin:$PATH"
-  command -v go >/dev/null || die "Go не установился"
-  version="$(go version | awk '{print $3}' | sed 's/^go//')"
-  major="${version%%.*}"
-  minor="${version#*.}"
-  minor="${minor%%.*}"
-  if [[ ! "$major" =~ ^[0-9]+$ || ! "$minor" =~ ^[0-9]+$ ]] ||
-    { (( major == 1 && minor < 23 )); }; then
-    die "установлен Go $version, требуется Go 1.23 или новее"
-  fi
+  mkdir -p "$WORK_DIR/go"
+  tar -C "$WORK_DIR/go" --strip-components=1 -xzf "$WORK_DIR/$archive"
+  export GOROOT="$WORK_DIR/go"
+  export PATH="$GOROOT/bin:$PATH"
+  export GOTOOLCHAIN=local
+  "$GOROOT/bin/go" version
 }
 
 download_source() {
@@ -122,8 +104,8 @@ install_go
 download_source
 (
   cd "$SOURCE_DIR"
-  go build -o "$WORK_DIR/panel-master" ./master/cmd/master
-  go build -o "$WORK_DIR/panel-agent" ./agent/cmd/agent
+  "$GOROOT/bin/go" build -o "$WORK_DIR/panel-master" ./master/cmd/master
+  "$GOROOT/bin/go" build -o "$WORK_DIR/panel-agent" ./agent/cmd/agent
 )
 cp "$WORK_DIR/panel-master" "$SOURCE_DIR/panel-master"
 cp "$WORK_DIR/panel-agent" "$SOURCE_DIR/panel-agent"
