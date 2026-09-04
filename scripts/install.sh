@@ -39,6 +39,15 @@ install_go() {
   else
     die "Go не найден, а пакетный менеджер не поддерживается"
   fi
+  command -v go >/dev/null || die "Go не установился"
+  version="$(go version | awk '{print $3}' | sed 's/^go//')"
+  major="${version%%.*}"
+  minor="${version#*.}"
+  minor="${minor%%.*}"
+  if [[ ! "$major" =~ ^[0-9]+$ || ! "$minor" =~ ^[0-9]+$ ]] ||
+    { (( major == 1 && minor < 23 )); }; then
+    die "установлен Go $version, требуется Go 1.23 или новее"
+  fi
 }
 
 download_source() {
