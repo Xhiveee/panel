@@ -13,6 +13,13 @@ if [[ "${PANEL_ALLOW_CUSTOM_REPO:-0}" == "1" ]]; then
 fi
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$WORK_DIR"' EXIT
+# Вся панель живёт в одном корне: бинарники, данные и конфиги не раскиданы
+# по серверу. Исключение — systemd units (systemd требует /etc/systemd/system).
+PANEL_ROOT="/opt/panel"
+BIN_DIR="$PANEL_ROOT/bin"
+MASTER_DATA="$PANEL_ROOT/master-data"
+AGENT_DATA="$PANEL_ROOT/agent-data"
+AGENT_JSON="$PANEL_ROOT/agent.json"
 
 log() { printf '\n\033[1;36m%s\033[0m\n' "$*" >&2; }
 die() { printf '\033[1;31mОшибка: %s\033[0m\n' "$*" >&2; exit 1; }
@@ -124,19 +131,22 @@ build_binary() {
 
 remove_master() {
   systemctl disable --now panel-master 2>/dev/null || true
-  rm -f /etc/systemd/system/panel-master.service /usr/local/bin/panel-master
-  rm -rf /var/lib/panel
+  rm -f /etc/systemd/system/panel-master.service "$BIN_DIR/panel-master"
+  rm -rf "$MASTER_DATA"
   systemctl daemon-reload
-  log "Master полностью удалён: сервис, бинарник и данные (/var/lib/panel)"
+  rmdir "$BIN_DIR" 2>/dev/null || true
+  rmdir "$PANEL_ROOT" 2>/dev/null || true
+  log "Master полностью удалён: сервис, бинарник и данные ($MASTER_DATA)"
 }
 
 remove_agent() {
   systemctl disable --now panel-agent 2>/dev/null || true
-  rm -f /etc/systemd/system/panel-agent.service /usr/local/bin/panel-agent /etc/panel/agent.json
-  rmdir /etc/panel 2>/dev/null || true
-  rm -rf /var/lib/panel-agent
+  rm -f /etc/systemd/system/panel-agent.service "$BIN_DIR/panel-agent" "$AGENT_JSON"
+  rm -rf "$AGENT_DATA"
   systemctl daemon-reload
-  log "Agent полностью удалён: сервис, бинарник, конфиг и данные (/var/lib/panel-agent)"
+  rmdir "$BIN_DIR" 2>/dev/null || true
+  rmdir "$PANEL_ROOT" 2>/dev/null || true
+  log "Agent полностью удалён: сервис, бинарник, конфиг и данные ($AGENT_DATA)"
 }
 
 show_master_info() {
@@ -150,7 +160,8 @@ show_master_info() {
   printf 'Логин:            %s\n' "$username"
   printf 'Пароль:           тот, который вы ввели выше\n'
   printf '\n'
-  printf 'Данные Master:     /var/lib/panel\n'
+  printf 'Корень панели:    %s\n' "$PANEL_ROOT"
+  printf 'Данные Master:     %s\n' "$MASTER_DATA"
   printf 'Статус:            systemctl status panel-master --no-pager\n'
   printf 'Логи:              journalctl -u panel-master -n 50 --no-pager\n'
   printf '\n'
@@ -159,11 +170,11 @@ show_master_info() {
 }
 
 show_agent_info() {
-  local data_dir="$1"
   printf '\n'
   log "Готово: Agent установлен и запущен"
-  printf 'Конфигурация:      /etc/panel/agent.json\n'
-  printf 'Данные Agent:      %s\n' "$data_dir"
+  printf 'Корень панели:      %s\n' "$PANEL_ROOT"
+  printf 'Конфигурация:      %s\n' "$AGENT_JSON"
+  printf 'Данные Agent:      %s\n' "$AGENT_DATA"
   printf 'Статус:            systemctl status panel-agent --no-pager\n'
   printf 'Логи:              journalctl -u panel-agent -n 50 --no-pager\n'
   printf '\n'
@@ -179,10 +190,16 @@ install_master() {
   valid_value "$username" || die "логин содержит недопустимые символы"
   valid_value "$admin_pass" || die "пароль содержит недопустимые символы"
 
-  install -m 0755 "$BINARY" /usr/local/bin/panel-master
-  id panel >/dev/null 2>&1 || useradd --system --home /var/lib/panel --shell /usr/sbin/nologin panel
-  mkdir -p /var/lib/panel
-  chown -R panel:panel /var/lib/panel
+  install -m 0755 -D "$BINARY" "$BIN_DIR/panel-master"
+  id panel >/dev/null 2>&1 || useradd --system --home "$PANEL_ROOT" --shell /usr/sbin/nologin panel
+  mkdir -p "$MASTER_DATA"
+  # One-time migration from the pre-/opt/panel layout.
+  if [[ ! -f "$MASTER_DATA/panel.db" && -f /var/lib/panel/panel.db ]]; then
+    log "Переношу базу Master из /var/lib/panel в $MASTER_DATA"
+    mv /var/lib/panel/panel.db* "$MASTER_DATA/" 2>/dev/null || true
+    rmdir /var/lib/panel 2>/dev/null || true
+  fi
+  chown -R panel:panel "$PANEL_ROOT"
   install -m 0644 "$SOURCE_DIR/deploy/systemd/panel-master.service" /etc/systemd/system/panel-master.service
 
   systemctl stop panel-master 2>/dev/null || true
@@ -193,7 +210,7 @@ install_master() {
   printf '%s:%s' "$username" "$admin_pass" >"$cred_file"
   chmod 600 "$cred_file"
   admin_pass=""
-  run_as_panel /usr/local/bin/panel-master -data /var/lib/panel \
+  run_as_panel "$BIN_DIR/panel-master" -data "$MASTER_DATA" \
     -create-admin-file "$cred_file" >"$log_file" 2>&1 &
   pid=$!
   ready=0
@@ -224,45 +241,47 @@ install_master() {
 }
 
 install_agent() {
-  local master_url token data_dir name canon
+  local master_url token name
   master_url="$(ask 'URL WebSocket master [wss://MASTER:8080/api/agent/ws]: ')"
   token="$(ask_secret 'Токен ноды из панели: ')"
   printf '\n' >&2
-  data_dir="$(ask 'Каталог данных [/var/lib/panel-agent]: ' /var/lib/panel-agent)"
   name="$(ask 'Имя ноды [node-1]: ' node-1)"
-  [[ -n "$master_url" && -n "$token" && -n "$data_dir" && -n "$name" ]] || die "все значения обязательны"
-  valid_value "$master_url" && valid_value "$data_dir" && valid_value "$name" ||
+  [[ -n "$master_url" && -n "$token" && -n "$name" ]] || die "все значения обязательны"
+  valid_value "$master_url" && valid_value "$name" ||
     die "значения содержат недопустимые символы"
   [[ "$master_url" == ws://* || "$master_url" == wss://* ]] || die "master URL должен начинаться с ws:// или wss:// (для продакшна — wss://)"
   [[ "$master_url" == wss://* ]] || log "Внимание: ws:// без TLS — токен и консоль видны в сети, используйте wss://"
 
-  install -m 0755 "$BINARY" /usr/local/bin/panel-agent
-  id panel >/dev/null 2>&1 || useradd --system --home /var/lib/panel-agent --shell /usr/sbin/nologin panel
-  # Canonicalize and confine: never chown -R an arbitrary path as root.
-  canon="$(realpath -m "$data_dir")"
-  [[ "$canon" == /var/lib/panel-agent || "$canon" == /var/lib/panel-agent/* ]] ||
-    die "каталог данных должен быть внутри /var/lib/panel-agent"
-  mkdir -p /etc/panel "$canon"
-  chown -R panel:panel "$canon"
+  install -m 0755 -D "$BINARY" "$BIN_DIR/panel-agent"
+  id panel >/dev/null 2>&1 || useradd --system --home "$PANEL_ROOT" --shell /usr/sbin/nologin panel
+  mkdir -p "$PANEL_ROOT" "$AGENT_DATA"
+  # One-time migration from the pre-/opt/panel layout (config keeps working:
+  # absolute dataDir inside stays valid).
+  if [[ ! -f "$AGENT_JSON" && -f /etc/panel/agent.json ]]; then
+    log "Переношу конфиг Agent из /etc/panel/agent.json в $AGENT_JSON"
+    cp /etc/panel/agent.json "$AGENT_JSON"
+    rmdir /etc/panel 2>/dev/null || true
+  fi
+  chown -R panel:panel "$PANEL_ROOT"
   # JSON without printf-injection: escape via python3 (preferred) or jq.
   if command -v python3 >/dev/null 2>&1; then
-    MASTER_URL="$master_url" TOKEN="$token" DATA_DIR="$canon" NAME="$name" python3 -c \
-      'import json,os; json.dump({"masterUrl":os.environ["MASTER_URL"],"token":os.environ["TOKEN"],"dataDir":os.environ["DATA_DIR"],"name":os.environ["NAME"]}, open("/etc/panel/agent.json","w"), indent=2)' \
+    MASTER_URL="$master_url" TOKEN="$token" DATA_DIR="$AGENT_DATA" NAME="$name" AGENT_JSON="$AGENT_JSON" python3 -c \
+      'import json,os; json.dump({"masterUrl":os.environ["MASTER_URL"],"token":os.environ["TOKEN"],"dataDir":os.environ["DATA_DIR"],"name":os.environ["NAME"]}, open(os.environ["AGENT_JSON"],"w"), indent=2)' \
       || die "не удалось записать agent.json"
   elif command -v jq >/dev/null 2>&1; then
-    jq -n --arg m "$master_url" --arg t "$token" --arg d "$canon" --arg n "$name" \
-      '{masterUrl:$m,token:$t,dataDir:$d,name:$n}' > /etc/panel/agent.json \
+    jq -n --arg m "$master_url" --arg t "$token" --arg d "$AGENT_DATA" --arg n "$name" \
+      '{masterUrl:$m,token:$t,dataDir:$d,name:$n}' > "$AGENT_JSON" \
       || die "не удалось записать agent.json"
   else
     die "нужен python3 или jq для безопасной записи agent.json"
   fi
   token=""; master_url=""
-  chown panel:panel /etc/panel/agent.json
-  chmod 600 /etc/panel/agent.json
+  chown panel:panel "$AGENT_JSON"
+  chmod 600 "$AGENT_JSON"
   install -m 0644 "$SOURCE_DIR/deploy/systemd/panel-agent.service" /etc/systemd/system/panel-agent.service
   systemctl daemon-reload
   systemctl enable --now panel-agent
-  show_agent_info "$data_dir"
+  show_agent_info
 }
 
 if [[ "$mode" == "remove-master" ]]; then
@@ -272,10 +291,11 @@ elif [[ "$mode" == "remove-agent" ]]; then
 elif [[ "$mode" == "remove-both" ]]; then
   remove_master
   remove_agent
-  # Оба компонента снесены вместе с данными — системный пользователь больше
-  # никому не нужен, удаляем и его, чтобы не оставалось следов.
+  # Оба компонента снесены вместе с данными — удаляем корень целиком и
+  # системного пользователя, чтобы не оставалось следов.
+  rm -rf "$PANEL_ROOT"
   userdel panel 2>/dev/null || true
-  log "Системный пользователь panel удалён"
+  log "Корень $PANEL_ROOT и пользователь panel удалены"
 else
   install_go
   download_source

@@ -2,6 +2,6 @@
   "_comment": "Use wss:// in production behind a TLS reverse proxy. ws:// sends the node token and console traffic in cleartext.",
   "masterUrl": "wss://panel.example.com/api/agent/ws",
   "token": "REPLACE_WITH_NODE_TOKEN",
-  "dataDir": "/var/lib/panel-agent",
+  "dataDir": "/opt/panel/agent-data",
   "name": "node-1"
 }

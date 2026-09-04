@@ -8,7 +8,7 @@ Wants=network-online.target
 Type=simple
 User=panel
 Group=panel
-ExecStart=/usr/local/bin/panel-agent -config /etc/panel/agent.json
+ExecStart=/opt/panel/bin/panel-agent -config /opt/panel/agent.json
 Restart=on-failure
 RestartSec=3
 StartLimitIntervalSec=120
@@ -16,7 +16,7 @@ StartLimitBurst=5
 # Hardening: agent executes instance commands, so confine writes.
 NoNewPrivileges=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/panel-agent /etc/panel
+ReadWritePaths=/opt/panel
 ProtectHome=true
 PrivateTmp=true
 

@@ -8,13 +8,13 @@ Wants=network-online.target
 Type=simple
 User=panel
 Group=panel
-ExecStart=/usr/local/bin/panel-master -addr :8080 -data /var/lib/panel
+ExecStart=/opt/panel/bin/panel-master -addr :8080 -data /opt/panel/master-data
 Restart=on-failure
 RestartSec=3
 # Hardening
 NoNewPrivileges=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/panel
+ReadWritePaths=/opt/panel/master-data
 PrivateTmp=true
 
 [Install]
