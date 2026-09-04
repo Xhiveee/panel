@@ -128,6 +128,42 @@ remove_agent() {
   fi
 }
 
+show_master_info() {
+  local username="$1" existing="$2" ip
+  ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  [[ -n "$ip" ]] || ip="<IP_СЕРВЕРА>"
+  printf '\n'
+  log "Готово: Master запущен"
+  printf 'Откройте панель: http://%s:8080\n' "$ip"
+  printf 'Локальный адрес:  http://127.0.0.1:8080\n'
+  printf 'Логин:            %s\n' "$username"
+  if [[ "$existing" -eq 1 ]]; then
+    printf 'Пароль:            используется прежний пароль существующего пользователя\n'
+  else
+    printf 'Пароль:            тот, который вы ввели выше\n'
+  fi
+  printf '\n'
+  printf 'Данные Master:     /var/lib/panel\n'
+  printf 'Статус:            systemctl status panel-master --no-pager\n'
+  printf 'Логи:              journalctl -u panel-master -n 50 --no-pager\n'
+  printf '\n'
+  printf 'Следующий шаг: войдите в панель, откройте раздел «Ноды», создайте ноду\n'
+  printf 'и установите Agent на сервере, где находятся Minecraft-серверы.\n'
+}
+
+show_agent_info() {
+  local data_dir="$1"
+  printf '\n'
+  log "Готово: Agent установлен и запущен"
+  printf 'Конфигурация:      /etc/panel/agent.json\n'
+  printf 'Данные Agent:      %s\n' "$data_dir"
+  printf 'Статус:            systemctl status panel-agent --no-pager\n'
+  printf 'Логи:              journalctl -u panel-agent -n 50 --no-pager\n'
+  printf '\n'
+  printf 'Если Agent не подключается, проверьте Master URL, токен и доступность\n'
+  printf 'порта 8080 (или reverse proxy URL wss://... для HTTPS).\n'
+}
+
 install_master() {
   local username admin_pass pid i log_file ready existing
   username="$(ask 'Логин администратора [admin]: ' admin)"
@@ -179,7 +215,7 @@ install_master() {
 
   systemctl daemon-reload
   systemctl enable --now panel-master
-  log "Master установлен и запущен"
+  show_master_info "$username" "$existing"
 }
 
 install_agent() {
@@ -203,7 +239,7 @@ install_agent() {
   install -m 0644 "$SOURCE_DIR/deploy/systemd/panel-agent.service" /etc/systemd/system/panel-agent.service
   systemctl daemon-reload
   systemctl enable --now panel-agent
-  log "Agent установлен и запущен"
+  show_agent_info "$data_dir"
 }
 
 if [[ "$mode" == "remove-master" ]]; then
