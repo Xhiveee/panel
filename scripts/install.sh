@@ -85,7 +85,7 @@ build_binary() {
 }
 
 install_master() {
-  local username admin_pass pid i log_file ready
+  local username admin_pass pid i log_file ready existing
   username="$(ask 'Логин администратора [admin]: ' admin)"
   admin_pass="$(ask 'Пароль администратора (минимум 6 символов): ')"
   [[ ${#admin_pass} -ge 6 ]] || die "пароль должен содержать минимум 6 символов"
@@ -105,20 +105,33 @@ install_master() {
     -create-admin "$username:$admin_pass" >"$log_file" 2>&1 &
   pid=$!
   ready=0
+  existing=0
   for ((i=0; i<30; i++)); do
     if grep -q "master listening" "$log_file" 2>/dev/null; then
       ready=1
       break
     fi
     if ! kill -0 "$pid" 2>/dev/null; then
-      wait "$pid" || { cat "$log_file" >&2; die "не удалось создать администратора"; }
+      if wait "$pid"; then
+        :
+      elif grep -q "UNIQUE constraint failed: users.username" "$log_file" 2>/dev/null; then
+        existing=1
+        break
+      else
+        cat "$log_file" >&2
+        die "не удалось создать администратора"
+      fi
     fi
     sleep 1
   done
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
   cat "$log_file"
-  [[ "$ready" -eq 1 ]] || die "Master не запустился за отведённое время"
+  if [[ "$existing" -eq 1 ]]; then
+    log "Пользователь уже существует, сохраняю текущую учётную запись"
+  elif [[ "$ready" -ne 1 ]]; then
+    die "Master не запустился за отведённое время"
+  fi
 
   systemctl daemon-reload
   systemctl enable --now panel-master
