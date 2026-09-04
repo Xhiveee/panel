@@ -10,7 +10,7 @@ trap 'rm -rf "$WORK_DIR"' EXIT
 log() { printf '\n\033[1;36m%s\033[0m\n' "$*"; }
 die() { printf '\033[1;31mОшибка: %s\033[0m\n' "$*" >&2; exit 1; }
 ask() { local prompt="$1" default="${2:-}" value; read -r -p "$prompt" value </dev/tty || true; printf '%s' "${value:-$default}"; }
-ask_secret() { local prompt="$1" value; read -r -s -p "$prompt" value </dev/tty || true; printf '\n' >&2; printf '%s' "$value"; }
+ask_secret() { local prompt="$1" value; read -r -p "$prompt" value </dev/tty || true; printf '%s' "$value"; }
 
 [[ "$(id -u)" -eq 0 ]] || die "запустите скрипт через sudo"
 command -v curl >/dev/null || die "не найден curl"
